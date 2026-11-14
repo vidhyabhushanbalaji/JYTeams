@@ -1,0 +1,175 @@
+"""Persistence for the Graph Creation section.
+
+The protocol keeps the service testable (tests use an in-memory repository); the
+Supabase implementation is a thin PostgREST wrapper and does no business logic.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Protocol
+
+from starlette.concurrency import run_in_threadpool
+
+from app.db.supabase import admin_client
+
+Row = dict[str, Any]
+
+_INSERT_BATCH = 500
+
+
+class GraphRepository(Protocol):
+    """Data access used by :class:`app.graph_creation.service.GraphCreationService`."""
+
+    async def create_project(self, *, owner_id: str, name: str) -> Row: ...
+
+    async def update_project(self, project_id: str, fields: Row) -> Row: ...
+
+    async def get_project(self, project_id: str) -> Row | None: ...
+
+    async def list_projects(self, owner_id: str) -> list[Row]: ...
+
+    async def create_job(
+        self, *, project_id: str, owner_id: str, mode: str, total_files: int
+    ) -> Row: ...
+
+    async def update_job(self, job_id: str, fields: Row) -> Row: ...
+
+    async def get_job(self, job_id: str) -> Row | None: ...
+
+    async def insert_directories(self, rows: list[Row]) -> list[Row]: ...
+
+    async def insert_files(self, rows: list[Row]) -> list[Row]: ...
+
+    async def update_directory(self, directory_id: str, fields: Row) -> Row: ...
+
+    async def get_directory(self, directory_id: str) -> Row | None: ...
+
+    async def list_directories(self, project_id: str) -> list[Row]: ...
+
+    async def list_files(self, project_id: str) -> list[Row]: ...
+
+
+class SupabaseGraphRepository:
+    """PostgREST-backed repository (service role client, so RLS does not apply)."""
+
+    async def _one(self, builder_factory: Any) -> Row | None:
+        def run() -> Row | None:
+            response = builder_factory().execute()
+            return response.data[0] if response.data else None
+
+        return await run_in_threadpool(run)
+
+    async def create_project(self, *, owner_id: str, name: str) -> Row:
+        def run() -> Row:
+            builder = admin_client().table("projects").insert({"owner_id": owner_id, "name": name})
+            response = builder.execute()
+            return response.data[0]
+
+        return await run_in_threadpool(run)
+
+    async def update_project(self, project_id: str, fields: Row) -> Row:
+        def run() -> Row:
+            builder = admin_client().table("projects").update(fields).eq("id", project_id)
+            response = builder.execute()
+            return response.data[0]
+
+        return await run_in_threadpool(run)
+
+    async def get_project(self, project_id: str) -> Row | None:
+        return await self._one(
+            lambda: admin_client().table("projects").select("*").eq("id", project_id).limit(1)
+        )
+
+    async def list_projects(self, owner_id: str) -> list[Row]:
+        def run() -> list[Row]:
+            response = (
+                admin_client()
+                .table("projects")
+                .select("*")
+                .eq("owner_id", owner_id)
+                .order("created_at", desc=True)
+                .execute()
+            )
+            return response.data or []
+
+        return await run_in_threadpool(run)
+
+    async def create_job(
+        self, *, project_id: str, owner_id: str, mode: str, total_files: int
+    ) -> Row:
+        payload = {
+            "project_id": project_id,
+            "owner_id": owner_id,
+            "mode": mode,
+            "total_files": total_files,
+            "status": "queued",
+        }
+
+        def run() -> Row:
+            response = admin_client().table("creation_jobs").insert(payload).execute()
+            return response.data[0]
+
+        return await run_in_threadpool(run)
+
+    async def update_job(self, job_id: str, fields: Row) -> Row:
+        def run() -> Row:
+            response = (
+                admin_client().table("creation_jobs").update(fields).eq("id", job_id).execute()
+            )
+            return response.data[0]
+
+        return await run_in_threadpool(run)
+
+    async def get_job(self, job_id: str) -> Row | None:
+        return await self._one(
+            lambda: admin_client().table("creation_jobs").select("*").eq("id", job_id).limit(1)
+        )
+
+    async def _insert(self, table: str, rows: list[Row]) -> list[Row]:
+        inserted: list[Row] = []
+        for start in range(0, len(rows), _INSERT_BATCH):
+            chunk = rows[start : start + _INSERT_BATCH]
+
+            def run(batch: list[Row] = chunk) -> list[Row]:
+                response = admin_client().table(table).insert(batch).execute()
+                return response.data or []
+
+            inserted.extend(await run_in_threadpool(run))
+        return inserted
+
+    async def insert_directories(self, rows: list[Row]) -> list[Row]:
+        return await self._insert("directories", rows)
+
+    async def insert_files(self, rows: list[Row]) -> list[Row]:
+        return await self._insert("files", rows)
+
+    async def update_directory(self, directory_id: str, fields: Row) -> Row:
+        def run() -> Row:
+            response = (
+                admin_client().table("directories").update(fields).eq("id", directory_id).execute()
+            )
+            return response.data[0]
+
+        return await run_in_threadpool(run)
+
+    async def get_directory(self, directory_id: str) -> Row | None:
+        return await self._one(
+            lambda: admin_client().table("directories").select("*").eq("id", directory_id).limit(1)
+        )
+
+    async def list_directories(self, project_id: str) -> list[Row]:
+        def run() -> list[Row]:
+            builder = admin_client().table("directories").select("*").eq("project_id", project_id)
+            response = builder.execute()
+            return response.data or []
+
+        return await run_in_threadpool(run)
+
+    async def list_files(self, project_id: str) -> list[Row]:
+        def run() -> list[Row]:
+            response = (
+                admin_client().table("files").select("*").eq("project_id", project_id).execute()
+            )
+            return response.data or []
+
+        return await run_in_threadpool(run)

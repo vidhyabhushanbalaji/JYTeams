@@ -1,0 +1,7 @@
+# Development / test tooling. Runtime deps come in through -r requirements.txt.
+-r requirements.txt
+pytest==9.2.0
+pytest-asyncio==1.5.0
+ruff==0.17.5
+# TestClient transport for Starlette 1.10+ (httpx is deprecated there).
+httpx2==2.16.0
