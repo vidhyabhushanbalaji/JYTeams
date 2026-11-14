@@ -41,7 +41,7 @@ async def collect_uploads(
             raise UploadValidationError(
                 f"the archive is larger than the {max_total_bytes} byte limit"
             )
-        return _entries_from_zip(
+        return entries_from_zip(
             archive_bytes,
             max_files=max_files,
             max_file_bytes=max_file_bytes,
@@ -68,7 +68,7 @@ async def collect_uploads(
     return entries
 
 
-def _entries_from_zip(
+def entries_from_zip(
     data: bytes,
     *,
     max_files: int,

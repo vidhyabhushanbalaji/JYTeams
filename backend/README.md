@@ -84,16 +84,16 @@ All are mounted under `/api/graph-creation` and require an identity (bearer toke
 | `project_id` | Target project, required for `mode=add` |
 
 ```powershell
-# a whole directory, zipped
-Compress-Archive -Path .\docs\* -DestinationPath .\docs.zip
+# a whole directory, zipped (zip the contents, not the folder, to keep the tree flat)
+Compress-Archive -Path .\test_docs\* -DestinationPath .\test_docs.zip
 curl.exe -X POST http://localhost:8000/api/graph-creation/uploads `
-  -F "mode=new" -F "name=Docs" -F "files=@docs.zip"
+  -F "mode=new" -F "name=Docs" -F "files=@test_docs.zip"
 
 # or loose files that carry their relative paths
 curl.exe -X POST http://localhost:8000/api/graph-creation/uploads `
   -F "mode=new" -F "name=Docs" `
-  -F "files=@README.md;filename=README.md" `
-  -F "files=@docs/api/auth.md;filename=docs/api/auth.md"
+  -F "files=@test_docs/README.md;filename=README.md" `
+  -F "files=@test_docs/docs/architecture.md;filename=docs/architecture.md"
 
 curl.exe http://localhost:8000/api/graph-creation/jobs/<job_id>
 ```
@@ -230,20 +230,28 @@ failed, `2` the name is taken.
 > spent. `GEMINI_MODEL=gemini-3.5-flash-lite` (a process-only override) usually still has
 > quota; the summaries stored on the project name the model that produced them.
 
-## Try it locally (upload a directory)
+## Try it locally (upload a directory or a .zip)
 
-`app/graph_creation/tools/upload_directory.py` uploads a folder and prints the tree:
+`app/graph_creation/tools/upload_directory.py` uploads a folder (as loose multipart parts)
+or a single `.zip` (one part, which the API expands) and prints the tree:
 
 ```powershell
-# preview only: validate the folder and show the tree + bottom-up order, no network
+# preview only: validate the input and show the tree + bottom-up order, no network
 ..\.venv\Scripts\python.exe -m app.graph_creation.tools.upload_directory ..\test_docs --dry-run
 
 # real upload against a running API, then print what was stored
 ..\.venv\Scripts\python.exe -m app.graph_creation.tools.upload_directory ..\test_docs --name Docs
 
+# the same folder as a .zip - one HTTP part instead of one part per file
+..\.venv\Scripts\python.exe -m app.graph_creation.tools.upload_directory ..\test_docs.zip --name Docs
+
 # extend an existing project
 ..\.venv\Scripts\python.exe -m app.graph_creation.tools.upload_directory ..\test_docs --mode add --project-id <uuid>
 ```
+
+> `Compress-Archive -Path .\test_docs` stores every entry under `test_docs/`, which becomes
+> an extra top-level folder in the graph. Zip the contents (`.\test_docs\*`) to get the same
+> tree as a directory upload.
 
 Options: `--url`, `--mode new|add`, `--name`, `--project-id`, `--token` (Supabase
 bearer token; otherwise the `X-Dev-User-Id` header is sent), `--depth`, `--timeout`,
