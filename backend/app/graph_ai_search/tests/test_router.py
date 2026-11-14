@@ -1,4 +1,4 @@
-"""HTTP contract of the Graph AI Search route (in-memory repository, no network)."""
+"""HTTP contract of the search route (in-memory repository and storage, no network)."""
 
 from __future__ import annotations
 
@@ -9,16 +9,13 @@ from fastapi.testclient import TestClient
 
 from app.core.config import get_settings
 from app.graph_ai_search.router import get_service
+from app.graph_ai_search.scoring import LocalScorer
 from app.graph_ai_search.service import GraphSearchService
-from app.graph_ai_search.tests.fakes import InMemorySearchRepository, ScriptedSearcher
+from app.graph_ai_search.storage import BlobCache, DocumentTextReader
+from app.graph_ai_search.tests.fakes import FakeBlobStore, InMemorySearchRepository
 from app.main import create_app
 
 SEARCH = "/api/graph-ai-search/projects/{project_id}/search"
-
-MATCHES = {
-    "": {"files": ["README.md"], "folders": ["guides"]},
-    "guides": {"files": ["deployment.md"], "folders": []},
-}
 
 
 @pytest.fixture()
@@ -29,30 +26,36 @@ def repository() -> InMemorySearchRepository:
 @pytest.fixture()
 def seeded(repository: InMemorySearchRepository):
     project = repository.seed_project(owner_id="user-1")
-    root_id = project["root_directory_id"]
+    root = project["root_directory_id"]
     repository.seed_file(
-        project["id"], directory_id=root_id, name="README.md", summary="Project overview."
+        project["id"],
+        directory_id=root,
+        name="README.md",
+        body="# PulseAPI\n\nEvent ingestion overview.",
     )
     guides = repository.seed_directory(
         project["id"],
-        parent_id=root_id,
+        parent_id=root,
         name="guides",
-        description="Deployment and rollback procedures.",
+        description="Deployment and release procedures.",
     )
     repository.seed_file(
         project["id"],
         directory_id=guides["id"],
         name="deployment.md",
-        summary="Helm deployment steps.",
+        body="# Deployment\n\nRoll back a release with the previous chart.",
     )
     return project
 
 
 @pytest.fixture()
-def api(repository: InMemorySearchRepository) -> Iterator[TestClient]:
+def api(repository: InMemorySearchRepository, seeded) -> Iterator[TestClient]:
     service = GraphSearchService(
         repository=repository,
-        searcher=ScriptedSearcher(matches=MATCHES, ranking=["deployment.md", "README.md"]),
+        reader=DocumentTextReader(
+            store=FakeBlobStore.from_repository(repository), cache=BlobCache(max_entries=4)
+        ),
+        scorer=LocalScorer(),
         settings=get_settings(),
     )
     application = create_app()
@@ -69,16 +72,32 @@ def _url(project_id: str) -> str:
 def test_search_returns_ranked_results(api: TestClient, seeded) -> None:
     project = seeded
 
-    response = api.get(_url(project["id"]), params={"q": "deploy a release"})
+    response = api.get(_url(project["id"]), params={"q": "deployment release"})
 
     assert response.status_code == 200
     body = response.json()
-    assert body["query"] == "deploy a release"
+    assert body["query"] == "deployment release"
     assert body["project_id"] == project["id"]
-    assert [hit["name"] for hit in body["results"]] == ["deployment.md", "README.md"]
+    assert [hit["name"] for hit in body["results"]] == ["deployment.md"]
     assert body["results"][0]["path"] == "guides/deployment.md"
-    assert body["opened_directories"] == ["", "guides"]
-    assert body["traversal"]["model"] == "scripted"
+    assert "deployment" in body["results"][0]["matched_terms"]
+    assert body["results"][0]["excerpt"]
+    assert "guides" in body["opened_directories"]
+    assert body["traversal"]["scorer_version"] == LocalScorer().version
+    assert body["traversal"]["files_read"] >= 1
+
+
+def test_optional_context_is_accepted(api: TestClient, seeded) -> None:
+    project = seeded
+
+    response = api.get(
+        _url(project["id"]), params={"q": "zzz qqq", "context": "deployment release"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["context"] == "deployment release"
+    assert [hit["name"] for hit in body["results"]] == ["deployment.md"]
 
 
 def test_search_is_scoped_to_the_caller(

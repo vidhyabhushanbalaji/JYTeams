@@ -34,7 +34,6 @@ import httpx
 
 from app.core.config import get_settings
 from app.graph_add.extract import MARKDOWN_SUFFIXES, extract_text
-from app.graph_add.llm import MockNavigator
 
 API_PREFIX = "/api/graph-add"
 CREATION_PREFIX = "/api/graph-creation"
@@ -132,7 +131,7 @@ def print_suggestions(payload: dict, *, full: bool) -> None:
         f"{brief['name']}  ({human_size(brief['size_bytes'])}, "
         f"sha256 {brief['content_sha256'][:12]}...)"
     )
-    emit(f"summary: {brief['summary']}", "  ", full=full)
+    emit(f"preview: {brief['preview']}", "  ", full=full)
     print()
     print(f"  {'#':>2}  {'score':>5}  {'path':<32}  {'files/dirs':>10}  leaf  reason")
 
@@ -154,15 +153,12 @@ def print_suggestions(payload: dict, *, full: bool) -> None:
             twins = ", ".join(item["identical_content_at"])
             print(f"        identical content already at: {twins}")
 
-    traversal = payload["traversal"]
+    scan = payload["scan"]
     print()
     print(
-        f"  traversal: expanded={traversal['expanded']} visited={traversal['visited']} "
-        f"degraded={traversal['degraded']} "
-        f"budget_exhausted={traversal['budget_exhausted']} model={traversal['model']}"
+        f"  scan: folders_scored={scan['folders_scored']} threshold={scan['threshold']} "
+        f"scorer={scan['scorer_version']} (no model call)"
     )
-    if traversal["degraded"]:
-        print("  ! a model call failed, so these suggestions may be incomplete")
 
 
 def print_placement(placed: dict) -> None:
@@ -187,11 +183,7 @@ def print_node(row: dict, *, full: bool, prefix: str = "") -> None:
     )
     emit(row.get("description"), prefix + "    ", full=full)
     for item in row.get("files", []):
-        print(
-            f"{prefix}    [F] {item['path']}  {human_size(item['size_bytes'])}  "
-            f"{item['summary_status']}"
-        )
-        emit(item.get("summary"), prefix + "        ", full=full)
+        print(f"{prefix}    [F] {item['path']}  {human_size(item['size_bytes'])}")
     for child in row.get("directories", []):
         print_node(child, full=full, prefix=prefix + "    ")
 
@@ -405,9 +397,11 @@ async def preview(args: argparse.Namespace, name: str, data: bytes) -> int:
         print(f"{name}: {extracted.reason}")
         return EXIT_ERROR
 
-    summary = await MockNavigator().summarise_file(name=name, text=extracted.text or "")
+    preview_text = " ".join((extracted.text or "").split())[:200]
     print(f"{name}  ({human_size(len(data))})")
-    emit(f"local summary (offline mock): {summary}", "  ", full=args.full)
+    emit(f"preview (what the wizard shows): {preview_text}", "  ", full=args.full)
+    print()
+    print("suggestions are ranked locally — this dry run makes no model call")
     print()
     print("would call:")
     print(f"  POST {args.url}{API_PREFIX}/suggestions")

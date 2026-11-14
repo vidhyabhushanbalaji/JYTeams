@@ -10,8 +10,8 @@ Run from ``backend/``:
 A directory is uploaded as loose multipart parts; a ``.zip`` is uploaded whole, as one part,
 and the API expands it - the same validated path a browser upload takes. The live run polls
 the creation job and prints the tree exactly as the API returns it. ``--dry-run`` never
-touches the network: it validates the input and previews the same bottom-up summaries with
-the offline mock summariser, which is useful before Supabase is configured.
+touches the network: it validates the input and previews the same bottom-up descriptions with
+the offline mock describer, which is useful before Supabase is configured.
 
 ``Compress-Archive -Path .\test_docs`` prefixes every entry with ``test_docs/``, which shows
 up as an extra top-level folder; zip the contents (``.\test_docs\*``) for a flat tree.
@@ -31,9 +31,9 @@ from pathlib import Path
 import httpx
 
 from app.core.config import get_settings
+from app.graph_creation.describe import MockDescriber, trim_for_prompt
 from app.graph_creation.extract import extract_text
 from app.graph_creation.ingest import entries_from_zip
-from app.graph_creation.summarise import MockSummarizer
 from app.graph_creation.tree import (
     DirectoryNode,
     FileEntry,
@@ -145,7 +145,7 @@ def emit(text: str | None, indent: str, *, full: bool) -> None:
 
 
 async def preview_local(entries: list[tuple[str, bytes]], *, full: bool) -> int:
-    """Validate the directory locally and preview the tree with the mock summariser."""
+    """Validate the directory locally and preview the tree with the mock describer."""
     settings = get_settings()
     try:
         tree = build_tree(
@@ -157,34 +157,33 @@ async def preview_local(entries: list[tuple[str, bytes]], *, full: bool) -> int:
         print(f"invalid directory: {exc}")
         return 1
 
-    summariser = MockSummarizer()
-    summaries: dict[str, str] = {}
+    describer = MockDescriber()
+    texts: dict[str, str] = {}
     descriptions: dict[str, str] = {}
+    limit = settings.description_file_head_chars
 
     for node in postorder(tree):
         for entry in node.files:
-            extracted = extract_text(
-                entry.data,
-                filename=entry.name,
-                max_chars=settings.summary_max_input_chars,
+            extracted = extract_text(entry.data, filename=entry.name, max_chars=limit)
+            texts[entry.path] = (
+                extracted.text if extracted.ok else f"(not included: {extracted.reason})"
             )
-            summaries[entry.path] = (
-                await summariser.summarise_file(name=entry.name, text=extracted.text or "")
-                if extracted.ok
-                else f"[skipped: {extracted.reason}]"
-            )
-        descriptions[node.path] = await summariser.summarise_directory(
+        descriptions[node.path] = await describer.describe_directory(
             path=node.path,
-            files=[(entry.name, summaries[entry.path]) for entry in node.files],
+            files=trim_for_prompt(
+                [(entry.name, texts[entry.path]) for entry in node.files],
+                per_file=limit,
+                total=settings.description_max_input_chars,
+            ),
             directories=[(child.name, descriptions[child.path]) for child in node.directories],
         )
 
     directories = list(postorder(tree))
     print(f"DRY RUN - {tree.total_files} file(s), {len(directories)} directory node(s), no network")
     print()
-    _print_local(tree, summaries, descriptions, full=full)
+    _print_local(tree, descriptions, full=full)
     print()
-    print("bottom-up summary order (this is how descriptions are produced):")
+    print("bottom-up description order (one model call per directory):")
     for node in directories:
         print(f"  {node.path or '(project root)'}")
     return 0
@@ -192,7 +191,6 @@ async def preview_local(entries: list[tuple[str, bytes]], *, full: bool) -> int:
 
 def _print_local(
     node: DirectoryNode,
-    summaries: dict[str, str],
     descriptions: dict[str, str],
     *,
     full: bool,
@@ -206,9 +204,8 @@ def _print_local(
     emit(descriptions.get(node.path), prefix + "    ", full=full)
     for entry in node.files:
         print(f"{prefix}    [F] {entry.path}  {human_size(entry.size)}")
-        emit(summaries.get(entry.path), prefix + "        ", full=full)
     for child in node.directories:
-        _print_local(child, summaries, descriptions, full=full, prefix=prefix + "    ")
+        _print_local(child, descriptions, full=full, prefix=prefix + "    ")
 
 
 async def upload_and_print(args: argparse.Namespace, upload: LocalUpload) -> int:
@@ -326,8 +323,7 @@ def _print_api(row: dict, *, full: bool, prefix: str = "") -> None:
     emit(row.get("description"), prefix + "    ", full=full)
     for item in row.get("files", []):
         size = human_size(item["size_bytes"])
-        print(f"{prefix}    [F] {item['path']}  {size}  {item['summary_status']}")
-        emit(item.get("summary"), prefix + "        ", full=full)
+        print(f"{prefix}    [F] {item['path']}  {size}")
     for child in row.get("directories", []):
         _print_api(child, full=full, prefix=prefix + "    ")
 

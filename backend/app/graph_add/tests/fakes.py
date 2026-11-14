@@ -8,13 +8,8 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from app.graph_add.navigate import (
-    CandidateContext,
-    ChildBrief,
-    Judgement,
-    RankedCandidate,
-)
-from app.graph_add.storage import StoredObject
+from app.graph_add.describer import DocumentContext, TargetContext
+from app.graph_add.storage import StorageError, StoredObject
 
 Row = dict[str, Any]
 
@@ -203,98 +198,45 @@ class InMemoryObjectStore:
         self.objects.setdefault(key, data)
         return StoredObject(bucket=self.bucket, path=key)
 
+    async def get(self, *, bucket: str, path: str) -> bytes:
+        try:
+            return self.objects[path]
+        except KeyError as exc:
+            raise StorageError(f"missing object {path}") from exc
 
-class ScriptedNavigator:
-    """Navigator with scripted answers, so tests pin the traversal exactly."""
+
+class ScriptedDescriber:
+    """Describer whose updates are scripted, so tests pin exactly which folders changed.
+
+    ``calls`` records one tuple of target paths per model call — a placement must produce
+    exactly one.
+    """
 
     model_name = "scripted"
 
     def __init__(
         self,
         *,
-        matches: dict[str, list[tuple[str, float]]] | None = None,
-        ranking: list[str] | None = None,
-        folder_names: dict[str, list[str]] | None = None,
+        updates: dict[str, str] | None = None,
         description: str | None = None,
-        fail_judging: bool = False,
-        fail_summarising: bool = False,
+        fail: bool = False,
     ) -> None:
-        self.matches = matches or {}
-        self.ranking = ranking
-        self.folder_names = folder_names or {}
+        self.updates = updates or {}
         self.description = description
-        self.fail_judging = fail_judging
-        self.fail_summarising = fail_summarising
-        self.calls: list[tuple[str, str]] = []
+        self.fail = fail
+        self.calls: list[tuple[str, ...]] = []
+        self.documents: list[DocumentContext] = []
 
-    async def summarise_file(self, *, name: str, text: str) -> str:
-        self.calls.append(("summarise", name))
-        if self.fail_summarising:
-            raise RuntimeError("summariser unavailable")
-        return f"Summary of {name}."
-
-    async def judge_children(
-        self,
-        *,
-        file_name: str,
-        summary: str,
-        path: str,
-        children: Sequence[ChildBrief],
-    ) -> Sequence[Judgement]:
-        self.calls.append(("judge", path))
-        if self.fail_judging:
-            raise RuntimeError("navigator unavailable")
-        by_name = {child.name: child for child in children}
-        judged: list[Judgement] = []
-        for name, relevance in self.matches.get(path, []):
-            child = by_name.get(name)
-            if child is None:
-                continue
-            judged.append(
-                Judgement(
-                    directory_id=child.directory_id,
-                    relevance=relevance,
-                    reason=f"Because of {name}.",
-                )
-            )
-        return judged
-
-    async def rank(
-        self,
-        *,
-        file_name: str,
-        summary: str,
-        candidates: Sequence[CandidateContext],
-    ) -> Sequence[RankedCandidate]:
-        self.calls.append(("rank", ""))
-        order = self.ranking or [candidate.node.name for candidate in candidates]
-        by_name = {candidate.node.name: candidate for candidate in candidates}
-        ranked: list[RankedCandidate] = []
-        for position, name in enumerate(order):
-            candidate = by_name.get(name)
-            if candidate is None:
-                continue
-            ranked.append(
-                RankedCandidate(
-                    directory_id=candidate.node.directory_id,
-                    score=round(1.0 - position * 0.1, 2),
-                    reason=f"Ranked {name}.",
-                    folder_names=tuple(self.folder_names.get(name, [])),
-                )
-            )
-        return ranked
-
-    async def describe_folder(
-        self,
-        *,
-        path: str,
-        files: Sequence[tuple[str, str]],
-        directories: Sequence[tuple[str, str]],
-    ) -> str:
-        self.calls.append(("describe", path))
-        if self.description is not None:
-            return self.description
-        label = path or "the project root"
-        names = ", ".join(name for name, _ in files) or "nothing"
-        folders = ", ".join(name for name, _ in directories) or "nothing"
-        return f"{label} holds files: {names}; subfolders: {folders}."
+    async def update_descriptions(
+        self, *, document: DocumentContext, targets: Sequence[TargetContext]
+    ) -> dict[str, str]:
+        self.calls.append(tuple(target.path for target in targets))
+        self.documents.append(document)
+        if self.fail:
+            raise RuntimeError("describer unavailable")
+        return {
+            target.path: self.updates.get(target.path)
+            or self.description
+            or f"{target.path or 'the project root'} now covers {document.name}."
+            for target in targets
+        }

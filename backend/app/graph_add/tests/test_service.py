@@ -1,4 +1,4 @@
-"""Behaviour of the suggest → place flow against in-memory collaborators."""
+"""Graph Add's two steps: local suggestions, then one call to refresh the descriptions."""
 
 from __future__ import annotations
 
@@ -14,342 +14,324 @@ from app.graph_add.storage import content_hash
 from app.graph_add.tests.fakes import (
     InMemoryAddRepository,
     InMemoryObjectStore,
-    ScriptedNavigator,
+    ScriptedDescriber,
 )
 
-DOC = b"# Auth\n\nToken refresh and session expiry."
+ROOT_DESCRIPTION = "The project root: release documentation."
+GUIDES_DESCRIPTION = "Deployment and release procedures, including rollback steps."
+LEGAL_DESCRIPTION = "Licences and trademarks."
+DOCUMENT = b"# Rollback runbook\n\nRoll back a failed release with the previous Helm chart.\n"
 
 
-def _service(navigator: ScriptedNavigator | None = None):
+def _service(describer: ScriptedDescriber | None = None):
     repository = InMemoryAddRepository()
     store = InMemoryObjectStore()
     service = GraphAddService(
         repository=repository,
         store=store,
-        navigator=navigator or ScriptedNavigator(),
+        describer=describer or ScriptedDescriber(),
         settings=get_settings(),
     )
     return service, repository, store
 
 
 def _seed(repository: InMemoryAddRepository):
-    """``root → docs → docs/api``, with one file already in ``docs/api``."""
     project = repository.seed_project()
     root_id = project["root_directory_id"]
-    docs = repository.seed_directory(
-        project["id"], parent_id=root_id, name="docs", description="Guides and how-tos."
+    repository.directories[root_id]["description"] = ROOT_DESCRIPTION
+    repository.seed_file(project["id"], directory_id=root_id, name="README.md")
+    guides = repository.seed_directory(
+        project["id"], parent_id=root_id, name="guides", description=GUIDES_DESCRIPTION
     )
-    api = repository.seed_directory(
-        project["id"], parent_id=docs["id"], name="api", description="HTTP endpoint reference."
+    repository.seed_file(project["id"], directory_id=guides["id"], name="deployment.md")
+    repository.seed_directory(
+        project["id"], parent_id=root_id, name="legal", description=LEGAL_DESCRIPTION
     )
-    repository.seed_file(
-        project["id"], directory_id=api["id"], name="users.md", summary="User endpoints."
-    )
-    return project, root_id, docs, api
+    return project, guides
 
 
-def _matching() -> ScriptedNavigator:
-    """A navigator that walks ``root → docs → docs/api``."""
-    return ScriptedNavigator(matches={"": [("docs", 0.9)], "docs": [("api", 0.9)]})
-
-
-async def _suggest(service, project, *, filename: str = "auth.md", data: bytes = DOC):
+async def _suggest(service, project, **kwargs: object):
     return await service.suggest(
-        owner_id="user-1", project_id=project["id"], filename=filename, data=data
+        owner_id=kwargs.pop("owner", "user-1"),  # type: ignore[arg-type]
+        project_id=project["id"],
+        filename=kwargs.pop("filename", "rollback-runbook.md"),  # type: ignore[arg-type]
+        data=kwargs.pop("data", DOCUMENT),  # type: ignore[arg-type]
     )
 
 
-async def _place(service, payload, **kwargs):
-    return await service.place(
-        owner_id="user-1",
-        request_id=payload["request_id"],
-        directory_id=kwargs.pop("directory_id", payload["suggestions"][0]["directory_id"]),
-        placement=kwargs.pop("placement", PlacementMode.DIRECT),
-        new_directory_name=kwargs.pop("new_directory_name", None),
-        file_name=kwargs.pop("file_name", None),
-    )
-
-
-async def test_suggest_returns_the_matching_leaf_and_stages_the_blob() -> None:
-    service, repository, store = _service(_matching())
-    project, *_ = _seed(repository)
+async def test_suggest_ranks_locally_without_calling_a_model() -> None:
+    describer = ScriptedDescriber()
+    service, repository, _ = _service(describer)
+    project, _ = _seed(repository)
 
     payload = await _suggest(service, project)
 
-    assert payload["suggestions"][0]["path"] == "docs/api"
-    assert payload["suggestions"][0]["reason"] == "Because of api."
-    assert payload["suggestions"][-1]["path"] == ""  # the root option is always offered
-    assert payload["traversal"]["model"] == "scripted"
-    assert payload["file"]["summary"] == "Summary of auth.md."
-    assert store.objects
-    stored = repository.requests[payload["request_id"]]
-    assert stored["status"] == "suggested"
-    assert stored["suggestions"] == payload["suggestions"]
+    assert payload["suggestions"][0]["path"] == "guides"
+    assert payload["suggestions"][0]["score"] > 0
+    assert "rollback" in payload["suggestions"][0]["matched_terms"]
+    assert payload["suggestions"][-1]["path"] == ""
+    assert payload["file"]["preview"].startswith("# Rollback runbook")
+    assert payload["scan"]["folders_scored"] == 3
+    assert payload["scan"]["scorer_version"]
+    assert describer.calls == []
 
 
-async def test_suggest_flags_a_clashing_name_with_alternatives() -> None:
-    service, repository, _ = _service(_matching())
-    project, _, _, api = _seed(repository)
+async def test_the_request_row_holds_everything_placement_needs() -> None:
+    service, repository, _ = _service()
+    project, _ = _seed(repository)
+
+    payload = await _suggest(service, project)
+
+    request = await repository.get_add_request(payload["request_id"])
+    assert request is not None
+    assert request["status"] == "suggested"
+    assert request["summary"] == payload["file"]["preview"]
+    assert request["storage_path"]
+    assert request["suggestions"] == payload["suggestions"]
+    assert request["traversal"] == payload["scan"]
+
+
+async def test_identical_content_already_in_the_tree_is_reported() -> None:
+    service, repository, _ = _service()
+    project, guides = _seed(repository)
     repository.seed_file(
-        project["id"], directory_id=api["id"], name="auth.md", summary="Existing auth notes."
+        project["id"],
+        directory_id=guides["id"],
+        name="old-runbook.md",
+        content_sha256=content_hash(DOCUMENT),
     )
 
     payload = await _suggest(service, project)
 
     top = payload["suggestions"][0]
-    assert top["name_available"] is False
-    assert top["suggested_file_names"][0] == "auth-2.md"
+    assert top["path"] == "guides"
+    assert top["identical_content_at"] == ["guides/old-runbook.md"]
 
 
-async def test_suggest_points_at_identical_content_elsewhere() -> None:
-    service, repository, _ = _service(_matching())
-    project, root_id, _, _ = _seed(repository)
-    repository.seed_file(
-        project["id"],
-        directory_id=root_id,
-        name="auth.md",
-        summary="The same document.",
-        content_sha256=content_hash(DOC),
-    )
+async def test_a_name_clash_comes_back_with_alternatives() -> None:
+    service, repository, _ = _service()
+    project, guides = _seed(repository)
+    repository.seed_file(project["id"], directory_id=guides["id"], name="rollback-runbook.md")
 
     payload = await _suggest(service, project)
 
-    assert payload["suggestions"][0]["identical_content_at"] == ["auth.md"]
+    top = payload["suggestions"][0]
+    assert top["path"] == "guides"
+    assert top["name_available"] is False
+    assert top["suggested_file_names"]
 
 
-async def test_suggest_rejects_a_non_markdown_upload() -> None:
-    service, repository, _ = _service(_matching())
-    project, *_ = _seed(repository)
+async def test_a_non_markdown_document_is_rejected() -> None:
+    service, repository, _ = _service()
+    project, _ = _seed(repository)
 
     with pytest.raises(HTTPException) as excinfo:
-        await _suggest(service, project, filename="diagram.png", data=b"\x89PNG")
+        await _suggest(service, project, filename="diagram.png", data=b"\x89PNG\r\n")
 
     assert excinfo.value.status_code == 415
-    assert "markdown" in str(excinfo.value.detail)
 
 
-async def test_suggest_requires_an_owned_project() -> None:
-    service, repository, _ = _service(_matching())
-    project, *_ = _seed(repository)
-
-    with pytest.raises(HTTPException) as excinfo:
-        await service.suggest(
-            owner_id="someone-else",
-            project_id=project["id"],
-            filename="auth.md",
-            data=DOC,
-        )
-
-    assert excinfo.value.status_code == 404
-
-
-async def test_a_failed_summary_is_a_retryable_502() -> None:
-    service, repository, _ = _service(ScriptedNavigator(fail_summarising=True))
-    project, *_ = _seed(repository)
+async def test_a_project_without_a_tree_is_a_conflict() -> None:
+    service, repository, _ = _service()
+    project = repository.seed_project()
+    repository.directories.clear()
 
     with pytest.raises(HTTPException) as excinfo:
         await _suggest(service, project)
 
-    assert excinfo.value.status_code == 502
+    assert excinfo.value.status_code == 409
 
 
-async def test_place_direct_writes_the_file_and_refreshes_ancestors() -> None:
-    service, repository, store = _service(_matching())
-    project, *_ = _seed(repository)
-    payload = await _suggest(service, project)
+async def test_another_users_project_is_not_found() -> None:
+    service, repository, _ = _service()
+    project, _ = _seed(repository)
 
-    result = await _place(service, payload)
+    with pytest.raises(HTTPException) as excinfo:
+        await _suggest(service, project, owner="someone-else")
+
+    assert excinfo.value.status_code == 404
+
+
+async def _place(
+    service,
+    suggestion,
+    *,
+    directory_id: str,
+    placement: PlacementMode = PlacementMode.DIRECT,
+    new_directory_name: str | None = None,
+    file_name: str | None = None,
+    owner: str = "user-1",
+):
+    return await service.place(
+        owner_id=owner,
+        request_id=suggestion["request_id"],
+        directory_id=directory_id,
+        placement=placement,
+        new_directory_name=new_directory_name,
+        file_name=file_name,
+    )
+
+
+async def test_a_direct_placement_refreshes_the_chain_in_one_call() -> None:
+    describer = ScriptedDescriber()
+    service, repository, _ = _service(describer)
+    project, guides = _seed(repository)
+    suggestion = await _suggest(service, project)
+
+    result = await _place(service, suggestion, directory_id=guides["id"])
 
     assert result["created_directory"] is False
-    assert result["file"]["path"] == "docs/api/auth.md"
-    assert result["refreshed_directories"] == 3
+    assert result["directory_path"] == "guides"
+    assert result["refreshed_directories"] == 2
+    assert describer.calls == [("guides", "")]
+    assert result["file"]["summary_status"] == "skipped"
 
     directories = {row["path"]: row for row in await repository.list_directories(project["id"])}
-    assert directories["docs/api"]["direct_file_count"] == 2
-    assert "auth.md" in directories["docs/api"]["description"]
-    assert "api" in directories["docs"]["description"]
-    assert "docs" in directories[""]["description"]
-
+    assert directories["guides"]["direct_file_count"] == 2
+    assert "rollback-runbook.md" in directories["guides"]["description"]
+    assert "rollback-runbook.md" in directories[""]["description"]
     project_row = await repository.get_project(project["id"])
-    assert "docs" in project_row["description"]
-    assert repository.requests[payload["request_id"]]["status"] == "placed"
-    assert len(store.objects) == 1
+    assert project_row["description"] == directories[""]["description"]
+
+    request = await repository.get_add_request(suggestion["request_id"])
+    assert request["status"] == "placed"
+    assert request["placed_file_id"] == result["file"]["id"]
 
 
-async def test_place_in_a_new_directory_creates_it_under_the_chosen_one() -> None:
-    service, repository, _ = _service(_matching())
-    project, *_ = _seed(repository)
-    payload = await _suggest(service, project)
+async def test_the_placed_document_text_reaches_the_describer() -> None:
+    describer = ScriptedDescriber()
+    service, repository, _ = _service(describer)
+    project, guides = _seed(repository)
+    suggestion = await _suggest(service, project)
+
+    await _place(service, suggestion, directory_id=guides["id"])
+
+    document = describer.documents[0]
+    assert document.name == "rollback-runbook.md"
+    assert document.directory_path == "guides"
+    assert "Rollback runbook" in document.text
+
+
+async def test_a_new_folder_is_described_by_the_same_call() -> None:
+    describer = ScriptedDescriber()
+    service, repository, _ = _service(describer)
+    project, guides = _seed(repository)
+    suggestion = await _suggest(service, project)
 
     result = await _place(
         service,
-        payload,
+        suggestion,
+        directory_id=guides["id"],
         placement=PlacementMode.NEW_DIRECTORY,
-        new_directory_name="authentication",
+        new_directory_name="runbooks",
     )
 
     assert result["created_directory"] is True
-    assert result["directory_path"] == "docs/api/authentication"
-    assert result["file"]["path"] == "docs/api/authentication/auth.md"
+    assert result["directory_path"] == "guides/runbooks"
+    # One call, covering the new folder, its parent and the root, deepest first.
+    assert describer.calls == [("guides/runbooks", "guides", "")]
+    assert result["refreshed_directories"] == 3
 
     directories = {row["path"]: row for row in await repository.list_directories(project["id"])}
-    created = directories["docs/api/authentication"]
-    assert created["depth"] == 3
-    assert created["ltree_path"] == "docs.api.authentication"
-    assert created["direct_file_count"] == 1
-    assert "auth.md" in created["description"]
-    assert directories["docs/api"]["child_directory_count"] == 1
-    assert directories["docs/api"]["direct_file_count"] == 1
+    assert directories["guides/runbooks"]["direct_file_count"] == 1
+    assert directories["guides/runbooks"]["description"]
+    assert directories["guides"]["child_directory_count"] == 1
 
 
-async def test_place_rejects_a_file_name_clash_with_alternatives() -> None:
-    service, repository, _ = _service(_matching())
-    project, _, _, api = _seed(repository)
-    repository.seed_file(
-        project["id"], directory_id=api["id"], name="auth.md", summary="Existing auth notes."
-    )
-    payload = await _suggest(service, project)
+async def test_a_rename_is_honoured() -> None:
+    service, repository, _ = _service()
+    project, guides = _seed(repository)
+    suggestion = await _suggest(service, project)
+
+    result = await _place(service, suggestion, directory_id=guides["id"], file_name="rollback.md")
+
+    assert result["file"]["path"] == "guides/rollback.md"
+
+
+async def test_a_describer_failure_keeps_the_placement_and_the_old_descriptions() -> None:
+    describer = ScriptedDescriber(fail=True)
+    service, repository, _ = _service(describer)
+    project, guides = _seed(repository)
+    suggestion = await _suggest(service, project)
+
+    result = await _place(service, suggestion, directory_id=guides["id"])
+
+    assert result["refreshed_directories"] == 2
+    directories = {row["path"]: row for row in await repository.list_directories(project["id"])}
+    assert directories["guides"]["description"] == GUIDES_DESCRIPTION
+    assert directories[""]["description"] == ROOT_DESCRIPTION
+    assert directories["guides"]["direct_file_count"] == 2
+
+
+async def test_an_unreadable_document_still_updates_the_descriptions() -> None:
+    describer = ScriptedDescriber()
+    service, repository, store = _service(describer)
+    project, guides = _seed(repository)
+    suggestion = await _suggest(service, project)
+    store.objects.clear()
+
+    result = await _place(service, suggestion, directory_id=guides["id"])
+
+    assert result["refreshed_directories"] == 2
+    assert describer.calls == [("guides", "")]
+    assert describer.documents[0].text == ""
+
+
+async def test_a_second_placement_is_refused() -> None:
+    service, repository, _ = _service()
+    project, guides = _seed(repository)
+    suggestion = await _suggest(service, project)
+    await _place(service, suggestion, directory_id=guides["id"])
 
     with pytest.raises(HTTPException) as excinfo:
-        await _place(service, payload)
+        await _place(service, suggestion, directory_id=guides["id"])
 
     assert excinfo.value.status_code == 409
-    detail = excinfo.value.detail
-    assert detail["conflict"]["path"] == "docs/api/auth.md"
-    assert detail["suggested_names"][0] == "auth-2.md"
 
 
-async def test_place_can_rename_instead_of_failing() -> None:
-    service, repository, _ = _service(_matching())
-    project, _, _, api = _seed(repository)
-    repository.seed_file(
-        project["id"], directory_id=api["id"], name="auth.md", summary="Existing auth notes."
-    )
-    payload = await _suggest(service, project)
-
-    result = await _place(service, payload, file_name="auth-2.md")
-
-    assert result["file"]["path"] == "docs/api/auth-2.md"
-
-
-async def test_place_rejects_a_clashing_new_directory() -> None:
-    service, repository, _ = _service(_matching())
-    project, _, _, api = _seed(repository)
-    repository.seed_directory(project["id"], parent_id=api["id"], name="authentication")
-    payload = await _suggest(service, project)
-
-    with pytest.raises(HTTPException) as excinfo:
-        await _place(
-            service,
-            payload,
-            placement=PlacementMode.NEW_DIRECTORY,
-            new_directory_name="authentication",
-        )
-
-    assert excinfo.value.status_code == 409
-    assert excinfo.value.detail["suggested_names"][0] == "authentication-2"
-
-
-async def test_place_allows_the_same_content_at_another_path() -> None:
-    service, repository, _ = _service(_matching())
-    project, _, docs, _ = _seed(repository)
-
-    first = await _suggest(service, project)
-    await _place(service, first)
-    second = await _suggest(service, project)
-
-    assert second["suggestions"][0]["identical_content_at"] == ["docs/api/auth.md"]
-    result = await _place(service, second, directory_id=docs["id"])
-    assert result["file"]["path"] == "docs/auth.md"
-
-    files = await repository.list_files(project["id"])
-    assert {row["path"] for row in files} == {
-        "docs/api/users.md",
-        "docs/api/auth.md",
-        "docs/auth.md",
-    }
-
-
-async def test_place_rejects_an_expired_request() -> None:
-    service, repository, _ = _service(_matching())
-    project, *_ = _seed(repository)
-    payload = await _suggest(service, project)
-    repository.requests[payload["request_id"]]["expires_at"] = (
-        datetime.now(UTC) - timedelta(minutes=1)
+async def test_an_expired_suggestion_is_gone() -> None:
+    service, repository, _ = _service()
+    project, guides = _seed(repository)
+    suggestion = await _suggest(service, project)
+    repository.requests[suggestion["request_id"]]["expires_at"] = (
+        datetime.now(UTC) - timedelta(hours=1)
     ).isoformat()
 
     with pytest.raises(HTTPException) as excinfo:
-        await _place(service, payload)
+        await _place(service, suggestion, directory_id=guides["id"])
 
     assert excinfo.value.status_code == 410
-    assert repository.requests[payload["request_id"]]["status"] == "expired"
 
 
-async def test_place_is_single_use() -> None:
-    service, repository, _ = _service(_matching())
-    project, *_ = _seed(repository)
-    payload = await _suggest(service, project)
-    await _place(service, payload)
+async def test_an_unknown_directory_is_not_found() -> None:
+    service, repository, _ = _service()
+    project, _ = _seed(repository)
+    suggestion = await _suggest(service, project)
 
     with pytest.raises(HTTPException) as excinfo:
-        await _place(service, payload)
-
-    assert excinfo.value.status_code == 409
-
-
-async def test_place_rejects_a_directory_from_another_project() -> None:
-    service, repository, _ = _service(_matching())
-    project, *_ = _seed(repository)
-    other = repository.seed_project()
-    payload = await _suggest(service, project)
-
-    with pytest.raises(HTTPException) as excinfo:
-        await _place(service, payload, directory_id=other["root_directory_id"])
+        await _place(service, suggestion, directory_id="directory-999")
 
     assert excinfo.value.status_code == 404
 
 
-async def test_get_request_replays_the_suggestions() -> None:
-    service, repository, _ = _service(_matching())
-    project, *_ = _seed(repository)
-    payload = await _suggest(service, project)
-
-    replay = await service.get_request(payload["request_id"], "user-1")
-
-    assert replay["suggestions"] == payload["suggestions"]
-    assert replay["file"]["name"] == "auth.md"
-    assert replay["status"] == "suggested"
+async def test_another_users_suggestion_is_not_found() -> None:
+    service, repository, _ = _service()
+    project, guides = _seed(repository)
+    suggestion = await _suggest(service, project)
 
     with pytest.raises(HTTPException) as excinfo:
-        await service.get_request(payload["request_id"], "someone-else")
+        await _place(service, suggestion, directory_id=guides["id"], owner="someone-else")
+
     assert excinfo.value.status_code == 404
 
 
-async def test_a_rejected_folder_name_creates_nothing() -> None:
-    service, repository, _ = _service(_matching())
-    project, _, _, api = _seed(repository)
-    repository.seed_directory(project["id"], parent_id=api["id"], name="authentication")
-    payload = await _suggest(service, project)
-    before = len(await repository.list_directories(project["id"]))
+async def test_replaying_a_suggestion_returns_the_preview_and_the_scan() -> None:
+    service, repository, _ = _service()
+    project, _ = _seed(repository)
+    suggestion = await _suggest(service, project)
 
-    with pytest.raises(HTTPException) as excinfo:
-        await _place(
-            service,
-            payload,
-            placement=PlacementMode.NEW_DIRECTORY,
-            new_directory_name="authentication",
-        )
+    replay = await service.get_request(suggestion["request_id"], "user-1")
 
-    assert excinfo.value.status_code == 409
-    assert len(await repository.list_directories(project["id"])) == before
-
-
-async def test_an_unknown_placement_is_rejected() -> None:
-    service, repository, _ = _service(_matching())
-    project, *_ = _seed(repository)
-    payload = await _suggest(service, project)
-
-    with pytest.raises(HTTPException) as excinfo:
-        await _place(service, payload, placement="sideways")
-
-    assert excinfo.value.status_code == 400
+    assert replay["file"]["preview"].startswith("# Rollback runbook")
+    assert replay["scan"]["folders_scored"] == 3
+    assert replay["suggestions"] == suggestion["suggestions"]

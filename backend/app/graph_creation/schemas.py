@@ -23,7 +23,9 @@ class FileOut(BaseModel):
     name: str
     path: str
     size_bytes: int
+    #: Null for every document: Graph Creation describes folders, not individual files.
     summary: str | None = None
+    #: Always `skipped` — "stored, not described" in the existing vocabulary.
     summary_status: str
     storage_bucket: str | None = None
     storage_path: str | None = None

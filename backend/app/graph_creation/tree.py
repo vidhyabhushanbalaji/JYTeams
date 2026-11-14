@@ -2,7 +2,7 @@
 
 A *leaf* is not a separate type: it is simply a directory with no child directories.
 Empty directories are dropped, because the graph only stores directories that lead to at
-least one file. Children are ordered deterministically so that summaries are stable for
+least one file. Children are ordered deterministically so that descriptions are stable for
 the same input.
 """
 
@@ -193,7 +193,7 @@ def _assign_ltree_paths(node: DirectoryNode) -> None:
 
 
 def postorder(root: DirectoryNode) -> Iterator[DirectoryNode]:
-    """Children before parents — the order summaries must be produced in."""
+    """Children before parents — the order descriptions must be produced in."""
     for child in root.directories:
         yield from postorder(child)
     yield root

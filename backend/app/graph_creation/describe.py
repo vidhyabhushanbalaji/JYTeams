@@ -1,19 +1,26 @@
-"""Summarisation: one short summary per file, one description per directory.
+"""Descriptions: one prose description per directory, written from the files inside it.
 
-Directories are described bottom-up: a directory's prompt is built from its child file
-summaries and its child directory descriptions, so the root ends up describing the whole
-project. Two implementations exist - ``GeminiSummarizer`` (real) and ``MockSummarizer``
-(deterministic, no network) - selected by ``SUMMARIZER``/``GEMINI_API_KEY``.
+There are no per-file summaries any more. Each directory's prompt carries the *text* of the files
+directly inside it (heads, capped) plus the descriptions of its child directories, and folders are
+described bottom-up, so the root ends up describing the whole project. That is one model call per
+directory instead of one per file plus one per directory.
+
+Two implementations exist - ``GeminiDescriber`` (real) and ``MockDescriber`` (deterministic, no
+network) - selected by ``SUMMARIZER``/``GEMINI_API_KEY``.
+
+Because a description is now the only thing a local search can match a folder on, the prompt asks
+for the words a reader would search for (tool names, error codes, concepts) rather than a neutral
+abstract.
 
 Three provider quirks are handled here, because each of them used to surface as "every
-summary failed" instead of a readable error:
+description failed" instead of a readable error:
 
 * the ``*-flash-lite`` models reject ``thinking_budget=0`` with ``400 INVALID_ARGUMENT``,
   so a rejected thinking config is retried once without it and remembered per model;
 * a ``429`` quota error cannot be fixed by retrying the same model seconds later, while a
   ``503`` overload can - only an overload is retried on the same model;
 * thinking tokens are billed against ``max_output_tokens``, so the output budget must be
-  large enough for a summary to fit next to them.
+  large enough for a description to fit next to them.
 """
 
 from __future__ import annotations
@@ -79,31 +86,26 @@ def _finish_reason(response: object) -> str:
     return str(getattr(candidates[0], "finish_reason", "unknown"))
 
 
-FILE_PROMPT = (
-    "You are indexing a project knowledge base. Summarise the markdown file below in "
-    "1-2 sentences for someone browsing a folder tree. State what the file is about, "
-    "not its formatting. Do not add commentary or repeat the filename.\n\n"
-    "File: {name}\n\n---\n{text}\n---"
-)
-
 DIRECTORY_PROMPT = (
     "You are describing one folder in a project knowledge tree. Write 2-4 sentences "
     "describing what this folder and everything under it contains, for someone deciding "
-    "whether to open it. Base it only on the child entries listed; never invent names.\n\n"
+    "whether to open it. Name the topics, tools, commands and concepts explicitly, because a "
+    "search matches this text to find the folder. Base it only on the entries below; never "
+    "invent names.\n\n"
     "Folder: {path}\n\n"
     "Files directly inside:\n{files}\n\n"
     "Subfolders:\n{subdirectories}"
 )
 
+FILE_BLOCK = "### {name}\n{text}"
 
-class Summarizer(Protocol):
-    """What the service needs from a summariser."""
+
+class Describer(Protocol):
+    """What the service needs: one description per directory, from the files inside it."""
 
     model_name: str
 
-    async def summarise_file(self, *, name: str, text: str) -> str: ...
-
-    async def summarise_directory(
+    async def describe_directory(
         self,
         *,
         path: str,
@@ -118,17 +120,47 @@ def _bullet_list(entries: Sequence[tuple[str, str]], empty: str = "(none)") -> s
     return "\n".join(f"- {name}: {summary}" for name, summary in entries)
 
 
-class MockSummarizer:
-    """Deterministic, offline summariser used by tests and keyless local runs."""
+def _file_blocks(files: Sequence[tuple[str, str]], empty: str = "(no files)") -> str:
+    """Render the files a folder holds as delimited blocks of text."""
+    if not files:
+        return empty
+    return "\n\n".join(FILE_BLOCK.format(name=name, text=text or "(empty)") for name, text in files)
+
+
+def trim_for_prompt(
+    files: Sequence[tuple[str, str]], *, per_file: int, total: int
+) -> list[tuple[str, str]]:
+    """Shorten each file's text so the whole folder fits in one prompt.
+
+    The share is equal rather than proportional on purpose: a folder of twenty short notes plus
+    one long document should still describe the notes.
+    """
+    if not files:
+        return []
+    per_file = max(200, per_file)
+    total = max(200, total)
+    limit = min(per_file, max(200, total // len(files)))
+    trimmed: list[tuple[str, str]] = []
+    for name, text in files:
+        value = text or ""
+        trimmed.append(
+            (name, value if len(value) <= limit else f"{value[:limit]}\n[… truncated …]")
+        )
+    return trimmed
+
+
+def _headline(text: str) -> str:
+    """First non-empty line of a document, trimmed — the mock's stand-in for real prose."""
+    first = next((line.strip(" #\t") for line in (text or "").splitlines() if line.strip()), "")
+    return first[:60] or "no content"
+
+
+class MockDescriber:
+    """Deterministic, offline describer used by tests and keyless local runs."""
 
     model_name = "mock"
 
-    async def summarise_file(self, *, name: str, text: str) -> str:
-        first_line = next((line.strip(" #\t") for line in text.splitlines() if line.strip()), "")
-        snippet = first_line[:120] or "no content"
-        return f"{name} - {snippet}"
-
-    async def summarise_directory(
+    async def describe_directory(
         self,
         *,
         path: str,
@@ -138,7 +170,7 @@ class MockSummarizer:
         label = path or "the project root"
         parts = [f"{label} holds {len(files)} file(s) and {len(directories)} subfolder(s)."]
         if files:
-            names = ", ".join(name for name, _ in files[:5])
+            names = ", ".join(f"{name} ({_headline(text)})" for name, text in files[:5])
             parts.append(f"Files: {names}.")
         if directories:
             names = ", ".join(name for name, _ in directories[:5])
@@ -146,7 +178,7 @@ class MockSummarizer:
         return " ".join(parts)
 
 
-class GeminiSummarizer:
+class GeminiDescriber:
     """Google Gemini implementation (``google-genai``)."""
 
     def __init__(
@@ -160,7 +192,7 @@ class GeminiSummarizer:
     ) -> None:
         if client is None:
             if not api_key:
-                raise ValueError("GEMINI_API_KEY is required for the Gemini summariser")
+                raise ValueError("GEMINI_API_KEY is required for the Gemini describer")
             from google import genai
             from google.genai import types
 
@@ -255,7 +287,8 @@ class GeminiSummarizer:
                     return text
 
                 last_error = ValueError(
-                    f"Gemini returned an empty summary (finish_reason={_finish_reason(response)})"
+                    "Gemini returned an empty description "
+                    f"(finish_reason={_finish_reason(response)})"
                 )
                 if include_thinking:
                     # Thinking tokens can consume the whole output budget.
@@ -266,10 +299,7 @@ class GeminiSummarizer:
 
         raise RuntimeError("Gemini failed for every model") from last_error
 
-    async def summarise_file(self, *, name: str, text: str) -> str:
-        return await self._generate(FILE_PROMPT.format(name=name, text=text))
-
-    async def summarise_directory(
+    async def describe_directory(
         self,
         *,
         path: str,
@@ -279,19 +309,19 @@ class GeminiSummarizer:
         return await self._generate(
             DIRECTORY_PROMPT.format(
                 path=path or "(project root)",
-                files=_bullet_list(files),
+                files=_file_blocks(files),
                 subdirectories=_bullet_list(directories),
             )
         )
 
 
-def build_summarizer(settings: Settings) -> Summarizer:
-    """Pick the summariser for the current configuration."""
+def build_describer(settings: Settings) -> Describer:
+    """Pick the describer for the current configuration."""
     if settings.resolved_summarizer == "gemini":
-        return GeminiSummarizer(
+        return GeminiDescriber(
             api_key=settings.gemini_api_key,
             model=settings.gemini_model,
             thinking_budget=settings.gemini_thinking_budget,
         )
-    logger.info("Using the offline mock summariser (no GEMINI_API_KEY configured)")
-    return MockSummarizer()
+    logger.info("Using the offline mock describer (no GEMINI_API_KEY configured)")
+    return MockDescriber()

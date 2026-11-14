@@ -2,7 +2,7 @@
 
 Mounted at ``/api/graph-creation``. An upload names a directory: either a new project
 tree (``mode=new``, which is also how a re-upload starts over) or an addition to an
-existing one (``mode=add``). Summarisation runs in the background; the caller polls the
+existing one (``mode=add``). Descriptions are written in the background; the caller polls the
 job.
 """
 
@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 
 from app.core.auth import CurrentUser, get_current_user
 from app.core.config import get_settings
+from app.graph_creation.describe import build_describer
 from app.graph_creation.ingest import collect_uploads
 from app.graph_creation.repository import SupabaseGraphRepository
 from app.graph_creation.schemas import (
@@ -26,19 +27,18 @@ from app.graph_creation.schemas import (
 )
 from app.graph_creation.service import GraphCreationService
 from app.graph_creation.storage import SupabaseObjectStore
-from app.graph_creation.summarise import build_summarizer
 from app.graph_creation.tree import UploadValidationError
 
 router = APIRouter(tags=["Graph Creation"])
 
 
 def get_service() -> GraphCreationService:
-    """Wire the service for a request (Supabase repository + storage + summariser)."""
+    """Wire the service for a request (Supabase repository + storage + describer)."""
     settings = get_settings()
     return GraphCreationService(
         repository=SupabaseGraphRepository(),
         store=SupabaseObjectStore(bucket=settings.storage_bucket),
-        summarizer=build_summarizer(settings),
+        describer=build_describer(settings),
         settings=settings,
     )
 
@@ -107,7 +107,7 @@ async def get_project(project_id: str, user: UserDep, service: ServiceDep) -> Pr
 @router.get(
     "/projects/{project_id}/tree",
     response_model=ProjectTreeOut,
-    summary="Get the project tree (with descriptions and file summaries)",
+    summary="Get the project tree (with descriptions for every folder)",
 )
 async def get_tree(
     project_id: str,

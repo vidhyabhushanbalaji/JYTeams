@@ -1,9 +1,14 @@
 """Orchestration for the Graph Creation section.
 
-Flow: validate the upload → build and prune the tree → summarise bottom-up (files first,
-then each directory from its children) → store the blobs → persist rows level by level.
+Flow: validate the upload → build and prune the tree → describe every directory bottom-up (from
+the text of the files it holds and the descriptions of its children) → store the blobs → persist
+rows level by level.
 
-Summaries are produced before anything is written, so a failed run never leaves a
+There is no per-file summarisation: one directory costs one model call, so a 50-file, 15-folder
+upload costs 15 calls instead of 65. A file row still records `summary_status='skipped'`, because
+the tree stores documents without describing them individually.
+
+Descriptions are produced before anything is written, so a failed run never leaves a
 half-described tree behind; only the job row records the failure.
 """
 
@@ -18,11 +23,11 @@ from datetime import UTC, datetime
 from fastapi import HTTPException, status
 
 from app.core.config import Settings
+from app.graph_creation.describe import Describer, trim_for_prompt
 from app.graph_creation.extract import extract_text
 from app.graph_creation.repository import GraphRepository, Row
 from app.graph_creation.schemas import UploadMode
 from app.graph_creation.storage import ObjectStore, StoredObject, content_hash
-from app.graph_creation.summarise import Summarizer
 from app.graph_creation.tree import (
     DirectoryNode,
     FileEntry,
@@ -55,16 +60,6 @@ def _failure_message(failed: int, detail: str | None) -> str | None:
 
 
 @dataclass
-class FileSummary:
-    """What was stored for one file."""
-
-    summary: str
-    status: str  # ok | skipped | failed
-    model: str | None
-    detail: str | None = None
-
-
-@dataclass
 class PreparedUpload:
     """A validated upload, ready to run in the background."""
 
@@ -76,19 +71,19 @@ class PreparedUpload:
 
 
 class GraphCreationService:
-    """Builds a directory tree and the summaries that describe it."""
+    """Builds a directory tree and the descriptions that make it navigable."""
 
     def __init__(
         self,
         *,
         repository: GraphRepository,
         store: ObjectStore,
-        summarizer: Summarizer,
+        describer: Describer,
         settings: Settings,
     ) -> None:
         self._repository = repository
         self._store = store
-        self._summarizer = summarizer
+        self._describer = describer
         self._settings = settings
 
     # ------------------------------------------------------------------ submit
@@ -140,15 +135,15 @@ class GraphCreationService:
         task.add_done_callback(_BACKGROUND_TASKS.discard)
 
     async def run_job(self, prepared: PreparedUpload) -> None:
-        """Summarise and persist. Never raises: failures land on the job row."""
+        """Describe the folders and persist. Never raises: failures land on the job row."""
         job_id = prepared.job["id"]
         try:
             await self._repository.update_job(job_id, {"status": "summarising"})
-            summaries, descriptions, failed, first_failure = await self._summarise_tree(prepared)
+            descriptions, failed, first_failure = await self._describe_tree(prepared)
             error = _failure_message(failed, first_failure)
 
             await self._repository.update_job(job_id, {"status": "persisting"})
-            await self._persist(prepared, summaries, descriptions)
+            await self._persist(prepared, descriptions)
 
             await self._repository.update_job(
                 job_id,
@@ -170,42 +165,33 @@ class GraphCreationService:
             except Exception:  # noqa: BLE001 - nothing else we can do
                 logger.exception("Could not record failure for job %s", job_id)
 
-    # -------------------------------------------------------------- summarise
+    # ---------------------------------------------------------------- describe
 
-    async def _summarise_tree(
+    async def _describe_tree(
         self, prepared: PreparedUpload
-    ) -> tuple[dict[str, FileSummary], dict[str, str], int, str | None]:
-        """Summarise files, then each directory from its children (post-order)."""
+    ) -> tuple[dict[str, str], int, str | None]:
+        """Describe every directory bottom-up: one model call each, no per-file summaries."""
         tree = prepared.tree
         job_id = prepared.job["id"]
-        semaphore = asyncio.Semaphore(max(1, self._settings.summary_concurrency))
-        cache: dict[str, FileSummary] = {}
-        summaries: dict[str, FileSummary] = {}
+        texts = self._file_texts(tree)
         descriptions: dict[str, str] = {}
         failed = 0
         first_failure: str | None = None
         processed = 0
         reported = 0
 
-        async def handle(entry: FileEntry) -> tuple[str, FileSummary]:
-            async with semaphore:
-                return entry.path, await self._summarise_file(entry, cache)
-
         for node in postorder(tree):
-            for path, summary in await asyncio.gather(*(handle(e) for e in node.files)):
-                summaries[path] = summary
-                if summary.status != "ok":
-                    failed += 1
-                    first_failure = first_failure or summary.detail
-            processed += len(node.files)
-
-            file_pairs = [(entry.name, summaries[entry.path].summary) for entry in node.files]
+            file_pairs = trim_for_prompt(
+                [(entry.name, texts[entry.path]) for entry in node.files],
+                per_file=self._settings.description_file_head_chars,
+                total=self._settings.description_max_input_chars,
+            )
             directory_pairs = [
                 (child.name, descriptions.get(child.path) or "no description")
                 for child in node.directories
             ]
             try:
-                descriptions[node.path] = await self._summarizer.summarise_directory(
+                descriptions[node.path] = await self._describer.describe_directory(
                     path=node.path, files=file_pairs, directories=directory_pairs
                 )
             except Exception as exc:  # noqa: BLE001 - one bad node must not sink the job
@@ -214,58 +200,67 @@ class GraphCreationService:
                 failed += 1
                 first_failure = first_failure or f"{type(exc).__name__}: {exc}"
 
-            if processed - reported >= _PROGRESS_EVERY or processed == tree.total_files:
+            # Progress is reported in files: a directory counts once its own files are covered.
+            processed += node.direct_file_count
+            if processed - reported >= _PROGRESS_EVERY or processed >= tree.total_files:
                 reported = processed
-                await self._repository.update_job(job_id, {"processed_files": processed})
+                await self._repository.update_job(
+                    job_id, {"processed_files": min(processed, tree.total_files)}
+                )
 
-        return summaries, descriptions, failed, first_failure
+        return descriptions, failed, first_failure
 
-    async def _summarise_file(self, entry: FileEntry, cache: dict[str, FileSummary]) -> FileSummary:
-        digest = content_hash(entry.data)
-        cached = cache.get(digest)
-        if cached is not None:
-            return cached
+    def _file_texts(self, tree: DirectoryNode) -> dict[str, str]:
+        """Decode every uploaded file once, capped for prompt use."""
+        limit = self._settings.description_file_head_chars
+        return {
+            entry.path: self._prompt_text(entry.data, filename=entry.name, limit=limit)
+            for entry in _iter_files(tree)
+        }
 
-        extracted = extract_text(
-            entry.data,
-            filename=entry.name,
-            max_chars=self._settings.summary_max_input_chars,
-        )
-        if not extracted.ok:
-            result = FileSummary(
-                summary=f"Not summarised: {extracted.reason}.", status="skipped", model=None
-            )
+    @staticmethod
+    def _prompt_text(data: bytes, *, filename: str, limit: int) -> str:
+        """File text for a description prompt, or a note explaining why there is none."""
+        extracted = extract_text(data, filename=filename, max_chars=limit)
+        if extracted.ok:
+            return extracted.text or ""
+        return f"(not included: {extracted.reason})"
+
+    async def _stored_text(self, row: Row, cache: dict[str, str]) -> str:
+        """Text of an already-stored file, needed when re-describing a folder after an add."""
+        key = str(row.get("storage_path") or "")
+        if key in cache:
+            return cache[key]
+        if not key:
+            text = "(not included: no stored object)"
         else:
             try:
-                text = await self._summarizer.summarise_file(
-                    name=entry.name, text=extracted.text or ""
+                data = await self._store.get(
+                    bucket=str(row.get("storage_bucket") or self._store.bucket), path=key
                 )
-                result = FileSummary(summary=text, status="ok", model=self._summarizer.model_name)
-            except Exception as exc:  # noqa: BLE001 - recorded on the file row
-                logger.warning("Could not summarise %r: %s", entry.path, exc)
-                result = FileSummary(
-                    summary="Summary unavailable.",
-                    status="failed",
-                    model=None,
-                    detail=f"{type(exc).__name__}: {exc}",
+                text = self._prompt_text(
+                    data,
+                    filename=str(row.get("name") or ""),
+                    limit=self._settings.description_file_head_chars,
                 )
-
-        cache[digest] = result
-        return result
+            except Exception as exc:  # noqa: BLE001 - a stale description beats a dead job
+                logger.warning("Could not read %r for a description: %s", key, exc)
+                text = "(not included: unreadable)"
+        cache[key] = text
+        return text
 
     # ---------------------------------------------------------------- persist
 
     async def _persist(
         self,
         prepared: PreparedUpload,
-        summaries: dict[str, FileSummary],
         descriptions: dict[str, str],
     ) -> None:
         stored = await self._store_objects(prepared)
         if prepared.mode is UploadMode.ADD:
-            await self._persist_add(prepared, summaries, descriptions, stored)
+            await self._persist_add(prepared, descriptions, stored)
         else:
-            await self._persist_new(prepared, summaries, descriptions, stored)
+            await self._persist_new(prepared, descriptions, stored)
 
     async def _store_objects(self, prepared: PreparedUpload) -> dict[str, StoredObject]:
         project_id = prepared.project["id"]
@@ -287,7 +282,6 @@ class GraphCreationService:
     async def _persist_new(
         self,
         prepared: PreparedUpload,
-        summaries: dict[str, FileSummary],
         descriptions: dict[str, str],
         stored: dict[str, StoredObject],
     ) -> None:
@@ -307,7 +301,7 @@ class GraphCreationService:
             for row in await self._repository.insert_directories(rows):
                 path_to_id[row["path"]] = row["id"]
 
-        await self._insert_files(project_id, prepared.tree, path_to_id, summaries, stored)
+        await self._insert_files(project_id, prepared.tree, path_to_id, stored)
         await self._repository.update_project(
             project_id,
             {
@@ -319,7 +313,6 @@ class GraphCreationService:
     async def _persist_add(
         self,
         prepared: PreparedUpload,
-        summaries: dict[str, FileSummary],
         descriptions: dict[str, str],
         stored: dict[str, StoredObject],
     ) -> None:
@@ -345,7 +338,7 @@ class GraphCreationService:
                 for row in await self._repository.insert_directories(rows):
                     path_to_id[row["path"]] = row["id"]
 
-        await self._insert_files(project_id, prepared.tree, path_to_id, summaries, stored)
+        await self._insert_files(project_id, prepared.tree, path_to_id, stored)
         await self._refresh_ancestors(prepared, merged)
 
     async def _insert_files(
@@ -353,14 +346,12 @@ class GraphCreationService:
         project_id: str,
         tree: DirectoryNode,
         path_to_id: dict[str, str],
-        summaries: dict[str, FileSummary],
         stored: dict[str, StoredObject],
     ) -> None:
         rows: list[Row] = []
         for node in postorder(tree):
             directory_id = path_to_id[node.path]
             for entry in node.files:
-                summary = summaries[entry.path]
                 stored_object = stored[entry.path]
                 rows.append(
                     {
@@ -373,9 +364,11 @@ class GraphCreationService:
                         "mime_type": "text/markdown",
                         "storage_bucket": stored_object.bucket,
                         "storage_path": stored_object.path,
-                        "summary": summary.summary,
-                        "summary_status": summary.status,
-                        "summary_model": summary.model,
+                        # Documents are not summarised any more; the folder describes them.
+                        # 'skipped' is the existing vocabulary for "stored, not described".
+                        "summary": None,
+                        "summary_status": "skipped",
+                        "summary_model": None,
                     }
                 )
         if rows:
@@ -407,19 +400,29 @@ class GraphCreationService:
             row = by_path.get(path)
             return int(row["depth"]) if row else 0
 
+        texts = self._file_texts(prepared.tree)
+        fetched: dict[str, str] = {}
         for path in sorted(affected, key=depth, reverse=True):
             row = by_path.get(path)
             if row is None:
                 continue
-            file_pairs = [
-                (f["name"], f.get("summary") or "") for f in child_files.get(row["id"], [])
-            ]
+            entries: list[tuple[str, str]] = []
+            for item in child_files.get(row["id"], []):
+                file_text = texts.get(str(item["path"]))
+                if file_text is None:
+                    file_text = await self._stored_text(item, fetched)
+                entries.append((str(item["name"]), file_text))
+            file_pairs = trim_for_prompt(
+                entries,
+                per_file=self._settings.description_file_head_chars,
+                total=self._settings.description_max_input_chars,
+            )
             directory_pairs = [
                 (d["name"], d.get("description") or "no description")
                 for d in child_dirs.get(row["id"], [])
             ]
             try:
-                text = await self._summarizer.summarise_directory(
+                text = await self._describer.describe_directory(
                     path=path, files=file_pairs, directories=directory_pairs
                 )
             except Exception as exc:  # noqa: BLE001 - keep the rest of the refresh
@@ -434,7 +437,7 @@ class GraphCreationService:
                 row["id"],
                 {
                     "description": text,
-                    "description_model": self._summarizer.model_name,
+                    "description_model": self._describer.model_name,
                     **counts,
                 },
             )
@@ -530,7 +533,7 @@ class GraphCreationService:
             "ltree_path": node.ltree_path or None,
             "depth": node.depth,
             "description": description,
-            "description_model": self._summarizer.model_name if description else None,
+            "description_model": self._describer.model_name if description else None,
             "direct_file_count": node.direct_file_count,
             "child_directory_count": node.child_directory_count,
         }

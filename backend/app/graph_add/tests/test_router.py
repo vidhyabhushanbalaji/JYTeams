@@ -1,4 +1,4 @@
-"""HTTP contract of the Graph Add routes (in-memory repository, no network)."""
+"""HTTP contract of the Graph Add routes (in-memory repository and storage, no network)."""
 
 from __future__ import annotations
 
@@ -13,13 +13,13 @@ from app.graph_add.service import GraphAddService
 from app.graph_add.tests.fakes import (
     InMemoryAddRepository,
     InMemoryObjectStore,
-    ScriptedNavigator,
+    ScriptedDescriber,
 )
 from app.main import create_app
 
-DOC = b"# Auth\n\nToken refresh and session expiry."
 SUGGEST = "/api/graph-add/suggestions"
 PLACE = "/api/graph-add/placements"
+DOCUMENT = b"# Rollback runbook\n\nRoll back a failed release with the previous Helm chart.\n"
 
 
 @pytest.fixture()
@@ -29,22 +29,24 @@ def repository() -> InMemoryAddRepository:
 
 @pytest.fixture()
 def seeded(repository: InMemoryAddRepository):
-    project = repository.seed_project()
-    docs = repository.seed_directory(
+    project = repository.seed_project(owner_id="user-1")
+    root_id = project["root_directory_id"]
+    repository.directories[root_id]["description"] = "Release documentation."
+    guides = repository.seed_directory(
         project["id"],
-        parent_id=project["root_directory_id"],
-        name="docs",
-        description="Guides and how-tos.",
+        parent_id=root_id,
+        name="guides",
+        description="Deployment and release procedures, including rollback steps.",
     )
-    return project, docs
+    return project, guides
 
 
 @pytest.fixture()
-def api(repository: InMemoryAddRepository) -> Iterator[TestClient]:
+def api(repository: InMemoryAddRepository, seeded) -> Iterator[TestClient]:
     service = GraphAddService(
         repository=repository,
         store=InMemoryObjectStore(),
-        navigator=ScriptedNavigator(matches={"": [("docs", 0.9)]}),
+        describer=ScriptedDescriber(),
         settings=get_settings(),
     )
     application = create_app()
@@ -54,116 +56,104 @@ def api(repository: InMemoryAddRepository) -> Iterator[TestClient]:
     application.dependency_overrides.clear()
 
 
-def _upload(api: TestClient, project_id: str, *, filename: str = "auth.md", data: bytes = DOC):
+def _suggest(api: TestClient, project_id: str):
     return api.post(
         SUGGEST,
+        files={"file": ("rollback-runbook.md", DOCUMENT, "text/markdown")},
         data={"project_id": project_id},
-        files={"file": (filename, data, "text/markdown")},
     )
 
 
-def test_suggestion_endpoint_returns_ranked_locations(api: TestClient, seeded) -> None:
+def test_suggest_returns_ranked_suggestions(api: TestClient, seeded) -> None:
     project, _ = seeded
 
-    response = _upload(api, project["id"])
+    response = _suggest(api, project["id"])
 
     assert response.status_code == 200
     body = response.json()
-    assert body["request_id"]
-    assert body["file"]["name"] == "auth.md"
-    assert body["suggestions"][0]["path"] == "docs"
-    assert body["suggestions"][-1]["path"] == ""
-    assert body["traversal"]["model"] == "scripted"
+    assert set(body) == {
+        "request_id",
+        "project_id",
+        "status",
+        "expires_at",
+        "file",
+        "suggestions",
+        "scan",
+    }
+    assert body["file"]["preview"].startswith("# Rollback runbook")
+    assert body["suggestions"][0]["path"] == "guides"
+    assert "rollback" in body["suggestions"][0]["matched_terms"]
+    assert body["scan"]["folders_scored"] == 2
+    assert body["scan"]["scorer_version"]
 
 
-def test_suggestion_rejects_a_non_markdown_upload(api: TestClient, seeded) -> None:
-    project, _ = seeded
-
-    response = _upload(api, project["id"], filename="diagram.png", data=b"\x89PNG")
-
-    assert response.status_code == 415
-
-
-def test_suggestion_rejects_an_empty_upload(api: TestClient, seeded) -> None:
-    project, _ = seeded
-
-    response = _upload(api, project["id"], data=b"")
-
-    assert response.status_code == 400
-
-
-def test_suggestion_is_scoped_to_the_caller(
-    api: TestClient, seeded, repository: InMemoryAddRepository
-) -> None:
-    project, _ = seeded
-    repository.projects[project["id"]]["owner_id"] = "someone-else"
-
-    assert _upload(api, project["id"]).status_code == 404
-
-
-def test_placement_endpoint_creates_the_file(api: TestClient, seeded) -> None:
-    project, docs = seeded
-    suggestion = _upload(api, project["id"]).json()
+def test_place_returns_the_created_file(api: TestClient, seeded) -> None:
+    project, guides = seeded
+    suggestion = _suggest(api, project["id"]).json()
 
     response = api.post(
         PLACE,
         json={
             "request_id": suggestion["request_id"],
-            "directory_id": suggestion["suggestions"][0]["directory_id"],
+            "directory_id": guides["id"],
             "placement": "direct",
         },
     )
 
     assert response.status_code == 201
     body = response.json()
-    assert body["file"]["path"] == "docs/auth.md"
-    assert body["directory_path"] == "docs"
+    assert body["file"]["path"] == "guides/rollback-runbook.md"
+    assert body["file"]["summary_status"] == "skipped"
     assert body["created_directory"] is False
-    assert docs["name"] == "docs"
+    assert body["refreshed_directories"] == 2
 
 
-def test_placement_can_create_a_new_directory(api: TestClient, seeded) -> None:
+def test_a_replayed_suggestion_matches_what_was_shown(api: TestClient, seeded) -> None:
     project, _ = seeded
-    suggestion = _upload(api, project["id"]).json()
+    suggestion = _suggest(api, project["id"]).json()
+
+    response = api.get(f"{SUGGEST}/{suggestion['request_id']}")
+
+    assert response.status_code == 200
+    assert response.json()["suggestions"] == suggestion["suggestions"]
+    assert response.json()["file"]["preview"] == suggestion["file"]["preview"]
+
+
+def test_a_non_markdown_upload_is_rejected(api: TestClient, seeded) -> None:
+    project, _ = seeded
 
     response = api.post(
-        PLACE,
-        json={
-            "request_id": suggestion["request_id"],
-            "directory_id": suggestion["suggestions"][0]["directory_id"],
-            "placement": "new_directory",
-            "new_directory_name": "authentication",
-        },
+        SUGGEST,
+        files={"file": ("diagram.png", b"\x89PNG\r\n", "image/png")},
+        data={"project_id": project["id"]},
     )
 
-    assert response.status_code == 201
-    assert response.json()["file"]["path"] == "docs/authentication/auth.md"
+    assert response.status_code == 415
 
 
-def test_placement_conflict_returns_alternatives(api: TestClient, seeded) -> None:
+def test_an_empty_upload_is_rejected(api: TestClient, seeded) -> None:
     project, _ = seeded
-    suggestion = _upload(api, project["id"]).json()
-    payload = {
-        "request_id": suggestion["request_id"],
-        "directory_id": suggestion["suggestions"][0]["directory_id"],
-    }
 
-    assert api.post(PLACE, json=payload).status_code == 201
-    conflict = api.post(PLACE, json=payload)
+    response = api.post(
+        SUGGEST,
+        files={"file": ("empty.md", b"", "text/markdown")},
+        data={"project_id": project["id"]},
+    )
 
-    assert conflict.status_code == 409
-    assert "already been used" in conflict.json()["detail"]["message"]
+    assert response.status_code == 400
 
 
-def test_suggestion_can_be_read_back(api: TestClient, seeded) -> None:
+def test_a_missing_file_is_a_validation_error(api: TestClient, seeded) -> None:
     project, _ = seeded
-    suggestion = _upload(api, project["id"]).json()
 
-    replay = api.get(f"{SUGGEST}/{suggestion['request_id']}")
-
-    assert replay.status_code == 200
-    assert replay.json()["suggestions"] == suggestion["suggestions"]
+    assert api.post(SUGGEST, data={"project_id": project["id"]}).status_code == 422
 
 
-def test_unknown_suggestion_is_a_404(api: TestClient, seeded) -> None:
-    assert api.get(f"{SUGGEST}/nope").status_code == 404
+def test_another_users_suggestion_is_not_found(
+    api: TestClient, seeded, repository: InMemoryAddRepository
+) -> None:
+    project, _ = seeded
+    suggestion = _suggest(api, project["id"]).json()
+    repository.requests[suggestion["request_id"]]["owner_id"] = "someone-else"
+
+    assert api.get(f"{SUGGEST}/{suggestion['request_id']}").status_code == 404

@@ -2,7 +2,7 @@
 
 Every upload is markdown today, so extraction is a UTF-8 decode with a length cap. The
 function still reports *why* something could not be used, so the tree can record a file
-without inventing a summary for it.
+without inventing a description for it.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ class Extracted:
 
 
 def extract_text(data: bytes, *, filename: str, max_chars: int) -> Extracted:
-    """Decode a markdown file, or explain why it cannot be summarised."""
+    """Decode a markdown file, or explain why its text cannot be used."""
     suffix = PurePosixPath(filename).suffix.lower()
     if suffix not in MARKDOWN_SUFFIXES:
         return Extracted(None, f"unsupported file type {suffix or '(none)'}")

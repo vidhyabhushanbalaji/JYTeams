@@ -2,8 +2,8 @@
 
 Mounted at ``/api/graph-add``. A document is offered a ranked set of homes first, then
 placed once the user picks one — so the person, not the caller's guess, decides where the
-file lands. Both steps run inline: a suggestion is a handful of model calls, and placement
-writes a single row plus the descriptions above it.
+file lands. Suggestions are scored locally (no model call); placement writes one row and then
+refreshes the affected folder descriptions in a single model call.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 
 from app.core.auth import CurrentUser, get_current_user
 from app.core.config import get_settings
-from app.graph_add.llm import build_navigator
+from app.graph_add.describer import build_describer
 from app.graph_add.repository import SupabaseAddRepository
 from app.graph_add.schemas import PlacementIn, PlacementOut, SuggestionAccepted
 from app.graph_add.service import GraphAddService
@@ -24,12 +24,12 @@ router = APIRouter(tags=["Graph Add"])
 
 
 def get_service() -> GraphAddService:
-    """Wire the service for a request (Supabase repository + storage + navigator)."""
+    """Wire the service for a request (Supabase repository + storage + folder describer)."""
     settings = get_settings()
     return GraphAddService(
         repository=SupabaseAddRepository(),
         store=SupabaseObjectStore(bucket=settings.storage_bucket),
-        navigator=build_navigator(settings),
+        describer=build_describer(settings),
         settings=settings,
     )
 

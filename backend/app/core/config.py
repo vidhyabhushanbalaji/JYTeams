@@ -61,7 +61,20 @@ class Settings(BaseSettings):
     # Summarisation. "auto" uses Gemini when a key is present, otherwise a local mock.
     summarizer: Literal["auto", "gemini", "mock"] = "auto"
     summary_max_input_chars: int = 12_000
-    summary_concurrency: int = 4
+
+    # Directory descriptions (Graph Creation, and the refresh after a placement). A folder's
+    # prompt is built from the text of the files directly inside it, so two caps keep one large
+    # folder from producing an enormous request.
+    description_file_head_chars: int = 1_500
+    description_max_input_chars: int = 24_000
+
+    # Local (model-free) matching, shared by Graph AI Search and Graph Add suggestions. The
+    # folder threshold is the share of the query a folder description must cover before the
+    # walk opens that branch.
+    scoring_folder_threshold: float = 0.25
+    search_max_files_read: int = 200
+    search_max_document_chars: int = 200_000
+    blob_cache_entries: int = 256
 
     # Upload limits.
     max_upload_files: int = 2_000

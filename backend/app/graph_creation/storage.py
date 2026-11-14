@@ -33,7 +33,7 @@ class StoredObject:
 
 
 def content_hash(data: bytes) -> str:
-    """SHA-256 hex digest used for object keys and summary de-duplication."""
+    """SHA-256 hex digest used for object keys and content de-duplication."""
     return hashlib.sha256(data).hexdigest()
 
 
@@ -50,6 +50,8 @@ class ObjectStore(Protocol):
     async def put(
         self, *, project_id: str, digest: str, filename: str, data: bytes
     ) -> StoredObject: ...
+
+    async def get(self, *, bucket: str, path: str) -> bytes: ...
 
 
 class SupabaseObjectStore:
@@ -82,3 +84,14 @@ class SupabaseObjectStore:
 
         await run_in_threadpool(upload)
         return StoredObject(bucket=self.bucket, path=key)
+
+    async def get(self, *, bucket: str, path: str) -> bytes:
+        """Read one stored object back (used when re-describing an existing folder)."""
+
+        def download() -> bytes:
+            try:
+                return admin_client().storage.from_(bucket).download(path)
+            except Exception as exc:  # noqa: BLE001 - surfaced as one typed error
+                raise StorageError(f"could not read {bucket}/{path}: {exc}") from exc
+
+        return await run_in_threadpool(download)

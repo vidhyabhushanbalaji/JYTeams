@@ -9,9 +9,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import get_settings
+from app.graph_creation.describe import MockDescriber
 from app.graph_creation.router import get_service
 from app.graph_creation.service import GraphCreationService
-from app.graph_creation.summarise import MockSummarizer
 from app.graph_creation.tests.fakes import InMemoryGraphRepository, InMemoryObjectStore
 from app.main import create_app
 
@@ -37,7 +37,7 @@ def service(repository: InMemoryGraphRepository) -> _SyncService:
     return _SyncService(
         repository=repository,
         store=InMemoryObjectStore(),
-        summarizer=MockSummarizer(),
+        describer=MockDescriber(),
         settings=get_settings(),
     )
 

@@ -5,8 +5,8 @@ from __future__ import annotations
 import itertools
 from typing import Any
 
-from app.graph_creation.storage import StoredObject
-from app.graph_creation.summarise import MockSummarizer
+from app.graph_creation.describe import MockDescriber
+from app.graph_creation.storage import StorageError, StoredObject
 
 Row = dict[str, Any]
 
@@ -118,17 +118,19 @@ class InMemoryObjectStore:
         self.objects.setdefault(key, data)
         return StoredObject(bucket=self.bucket, path=key)
 
+    async def get(self, *, bucket: str, path: str) -> bytes:
+        try:
+            return self.objects[path]
+        except KeyError as exc:
+            raise StorageError(f"missing object {path}") from exc
 
-class RecordingSummarizer(MockSummarizer):
-    """Mock summariser that records the order it was called in."""
+
+class RecordingDescriber(MockDescriber):
+    """Mock describer that records the order it was called in."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
-    async def summarise_file(self, *, name: str, text: str) -> str:
-        self.calls.append(("file", name))
-        return await super().summarise_file(name=name, text=text)
-
-    async def summarise_directory(self, *, path: str, files: Any, directories: Any) -> str:
+    async def describe_directory(self, *, path: str, files: Any, directories: Any) -> str:
         self.calls.append(("directory", path))
-        return await super().summarise_directory(path=path, files=files, directories=directories)
+        return await super().describe_directory(path=path, files=files, directories=directories)

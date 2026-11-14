@@ -1,7 +1,7 @@
 # JYTeams backend
 
 FastAPI service for the JYTeams desktop app. Python 3.14, **Supabase** for auth, Postgres
-(the project tree) and file storage, **Gemini** for summaries.
+(the project tree) and file storage, **Gemini** for folder descriptions.
 
 ## Setup
 
@@ -68,10 +68,10 @@ All are mounted under `/api/graph-creation` and require an identity (bearer toke
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/uploads` | Upload a markdown directory → `202 {project_id, job_id, total_files}` |
-| `GET` | `/jobs/{job_id}` | Progress: `queued → summarising → persisting → ok / partial / failed` |
+| `GET` | `/jobs/{job_id}` | Progress: `queued → summarising → persisting → ok / partial / failed` (the `summarising` stage describes folders now; the name is kept for the schema) |
 | `GET` | `/projects` | Your projects |
 | `GET` | `/projects/{project_id}` | One project (name + whole-project description) |
-| `GET` | `/projects/{project_id}/tree?depth=N` | Nested tree with descriptions and file summaries |
+| `GET` | `/projects/{project_id}/tree?depth=N` | Nested tree with descriptions for every folder |
 | `GET` | `/directories/{directory_id}` | One directory + its immediate children |
 
 `POST /uploads` form fields:
@@ -102,6 +102,7 @@ curl.exe http://localhost:8000/api/graph-creation/jobs/<job_id>
 
 All are mounted under `/api/graph-add` and require an identity (bearer token, or
 `X-Dev-User-Id` in dev mode). Adding a document is a two-step wizard: suggest, then place.
+Suggestions are scored locally, so they cost **no model calls**; placement costs exactly one.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -110,12 +111,12 @@ All are mounted under `/api/graph-add` and require an identity (bearer token, or
 | `GET` | `/suggestions/{request_id}` | Re-read the suggestions that were shown |
 
 `POST /suggestions` (multipart): `file` — a single `.md`/`.markdown`/`.mdx`; `project_id` —
-the tree to extend. The response carries `request_id`, the document `summary`, and up to
-three ranked `suggestions` plus the project root, each with `score`, `reason`,
-`proposed_new_directory_names`, `name_available`, `suggested_file_names` (free names when
-the uploaded name clashes) and `identical_content_at` (paths holding the same bytes).
-`traversal` reports what the walk cost and whether it had to stop early (`degraded`,
-`budget_exhausted`).
+the tree to extend. The response carries `request_id`, the document `preview` (its first ~200
+characters — no model wrote it), and up to three ranked `suggestions` plus the project root,
+each with `score`, `reason`, `matched_terms`, `proposed_new_directory_names`,
+`name_available`, `suggested_file_names` (free names when the uploaded name clashes) and
+`identical_content_at` (paths holding the same bytes). `scan` reports what the ranking cost:
+`folders_scored`, `threshold` and `scorer_version`.
 
 `POST /placements` (JSON):
 
@@ -129,38 +130,39 @@ the uploaded name clashes) and `identical_content_at` (paths holding the same by
 
 Errors: `400` bad name/empty upload, `404` unknown or unowned project/directory/request,
 `409` a path already exists (with `suggested_names`) or the suggestion was already used,
-`410` the suggestion expired, `415` not markdown, `502` the model could not summarise the
-document.
+`410` the suggestion expired, `415` not markdown.
 
 Duplicates are allowed: the same bytes may live at several paths, because blobs are
 content-addressed — only an identical `(project_id, path)` is a conflict.
 
 ### How a document is placed
 
-1. **Summary** — the document is summarised exactly like a Graph Creation file.
-2. **Walk** (`navigate.py`) — starting at the root, the model judges which child folders
-   relate to the summary, seeing each folder's description, a few names it contains, and its
-   counts; only the matching ones are opened. A node becomes a *candidate* when it is a leaf,
-   when none of its children relate, or when the budget is spent. Bounded by
-   `MAX_EXPANSIONS` (8) calls, `MAX_BRANCH` (3) children per node and `MAX_CANDIDATES` (3)
-   results.
-3. **Rank** — one consolidation call orders the shortlist, because scores from separate
-   calls are not comparable. The root is always offered as a last option.
-4. **Place** — every check runs first, so a rejected placement writes nothing; then the file
-   row is written (creating the folder first if asked), and the affected directory and its
-   ancestors are re-described bottom-up and their child counts refreshed, so the tree keeps
-   the invariant Graph Creation established.
+1. **Scan** (`scoring.py`, `navigate.py`) — the document is reduced to its title, filename and
+   its ~40 most frequent terms, and **every** folder in the project is scored against that
+   query: description (55%), name (25%) and a few names it holds (20%), using the same weights
+   Graph AI Search uses. No model is called — scoring a few hundred folders costs nothing —
+   and the scan is exhaustive rather than a walk, so a parent with a vague description cannot
+   hide a child that is a perfect match. The best `MAX_CANDIDATES` (3) are offered and the
+   project root is always added last.
+2. **Place** — every check runs first, so a rejected placement writes nothing; then the file
+   row is written (creating the folder first if asked), and **one** model call
+   (`describer.py`) updates the affected descriptions: the new folder (if one was created),
+   the folder the document landed in, and every ancestor, deepest first. Their child counts
+   are refreshed from the same rows, so the tree keeps the invariant Graph Creation
+   established. A failed call leaves the existing descriptions in place — a stale description
+   is better than a failed placement.
 
 The uploaded bytes and the suggestions are held on an `add_requests` row between the two
-steps, so placement never re-uploads or re-summarises the document. Without a
-`GEMINI_API_KEY` a deterministic mock navigator is used (keyword overlap, same code paths),
-which is also what the tests exercise.
+steps, so placement never re-uploads the document, and blobs stay content-addressed so
+identical documents share one object. Documents are not summarised at all; only the folders
+around them are described. Without a `GEMINI_API_KEY` a deterministic mock describer is used
+(it names the files and subfolders it sees), which is also what the tests exercise.
 
 ## Graph AI Search endpoints
 
-Mounted under `/api/graph-ai-search`. One read endpoint: it walks the project tree for a query
-and returns the documents that answer it, ranked. **Nothing is written**, so it is safe to call
-repeatedly.
+Mounted under `/api/graph-ai-search`. One read endpoint: it scores the project tree for a
+query and returns the documents that answer it, ranked, plus the folders worth browsing.
+**No model is called and nothing is written**, so it is cheap to call repeatedly.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -169,13 +171,15 @@ repeatedly.
 | Query param | Default | Meaning |
 | --- | --- | --- |
 | `q` | — | What you are looking for (3–500 characters after trimming) |
+| `context` | *(empty)* | Optional extra wording to widen the match (≤500 characters) |
 | `limit` | `8` | Results to return (1–25) |
 | `min_score` | `0.0` | Drop hits below this score |
-| `max_directories` | *(unset)* | Optional valve: stop after opening this many folders. Unset means the walk runs until its frontier is empty |
+| `max_directories` | *(unset)* | Optional valve: stop after opening this many folders |
 
 ```json
 {
   "query": "how do I roll back a bad production release",
+  "context": "",
   "project_id": "014c45b7-…",
   "results": [
     {
@@ -184,51 +188,56 @@ repeatedly.
       "path": "guides/rollback-deployment.md",
       "directory_id": "dd473be5-…",
       "directory_path": "guides",
-      "summary": "This document provides a step-by-step guide for performing a Helm rollback…",
-      "score": 0.92,
-      "reason": "This guide provides a direct, step-by-step procedure for performing a Helm rollback in a production environment."
+      "score": 0.71,
+      "matched_terms": ["deployment", "release", "rollback"],
+      "excerpt": "This document provides a step-by-step guide for performing a Helm rollback…"
+    }
+  ],
+  "directories": [
+    {
+      "directory_id": "dd473be5-…", "path": "guides", "name": "guides", "depth": 1,
+      "score": 0.42, "matched_terms": ["deployment", "release"]
     }
   ],
   "opened_directories": ["", "guides"],
   "traversal": {
     "directories_visited": 2, "directories_opened": 2, "documents_considered": 6,
-    "fallback_used": false, "degraded": false, "budget_exhausted": false,
-    "model": "gemini-3.5-flash-lite"
+    "files_read": 3, "fallback_used": false, "degraded": false, "budget_exhausted": false,
+    "scorer_version": "local-1", "duration_ms": 41
   }
 }
 ```
 
-Errors: `400` query too short/long or a numeric parameter out of range, `404` unknown or
-unowned project, `409` project has no tree, `502` the model could not search, `503` Supabase
-not configured.
+Errors: `400` query too short/long, context too long, or a numeric parameter out of range,
+`404` unknown or unowned project, `409` project has no tree.
 
 ### How a search runs
 
-1. **Walk** (`search.py`) — start at the root. One model call per folder answers both
-   questions at once: which files *here* answer the query, and which subfolders could contain
-   an answer. Every matching file is logged; every matching subfolder is opened. **There is no
-   expansion budget** — the walk ends when the frontier is empty, so cost follows how much of
-   the tree the model finds relevant. Folders are presented with their description plus a few
-   names they hold, because a vague description would otherwise hide a relevant branch.
-2. **Fallback** — if the walk logs nothing *and* the project has at most 40 documents, every
-   folder is swept once, so a folder whose description happens to be generic cannot hide its
-   files. `fallback_used` reports it. The `max_directories` valve disables the sweep — a
-   bounded request must not turn into an unbounded one.
-3. **Rank** — one consolidation call orders the logged files (`RANK_BATCH` = 25, at least the
-   maximum `limit`, so trimming never loses a rankable document). Larger logs are ranked in
-   batches and the winners are consolidated, because scores from separate calls are not
-   comparable. A failed folder call marks the response `degraded` and skips that subtree; a
-   failed ranking falls back to per-folder relevance. The route still answers `200` in both
-   cases, which is what happens when the model's quota runs out.
+1. **Walk** (`search.py`) — start at the root. Each folder is scored locally against the query
+   (`scoring.py`, the same weights Graph Add uses): the description, the folder name, and a few
+   names it holds. A folder clearing `SCORING_FOLDER_THRESHOLD` is opened; the rest are pruned
+   without reading anything.
+2. **Read** — the documents directly inside every opened folder are read from Storage and
+   scored against their own text. `matched_terms` says why one matched and `excerpt` shows
+   where; reads are cached by content hash, so identical documents cost one download, and
+   `SEARCH_MAX_FILES_READ` bounds a single search.
+3. **Fallback** — if the best match is weak (below 0.5) *and* the project has at most 40
+   documents, every folder is swept once, so a folder whose description happens to be generic
+   cannot hide its files. `fallback_used` reports it; the `max_directories` valve disables the
+   sweep, because a bounded request must not turn into an unbounded one.
+4. **Rank** — one sort, because every score comes from the same function and is therefore
+   comparable (no consolidation call exists any more). A document that cannot be read marks
+   the response `degraded` and is skipped; the route still answers `200`.
 
-Search runs on the stored summaries and descriptions — the documents themselves are never
-read. A query whose wording is absent from every summary cannot be found; that is the
-trade-off of using the tree as the index.
+Search reads folder descriptions to decide *where* to look and document bodies to decide *what*
+matched, so it needs no per-file summaries and no model. The trade-off is that matching is
+lexical — stemming, phrase and name bonuses help — so a query phrased in words the
+documentation never uses will still miss.
 
 ### Check it without a quota
 
 ```powershell
-# offline: the PulseAPI example tree, real stored summaries, mock searcher
+# offline: the PulseAPI example tree, seeded document text, local scorer (no model call)
 ..\.venv\Scripts\python.exe -m app.graph_ai_search.tools.verify_search
 
 # live, read-only, against a real project (needs SUPABASE_* and GEMINI_API_KEY)
@@ -236,7 +245,7 @@ trade-off of using the tree as the index.
   --project-id <uuid> --user <owner-uuid> [--only rollback] [--limit 5]
 ```
 
-`verify_search` seeds the exact example tree from the database (six documents), runs five
+`verify_search` seeds the exact example tree (six documents, with their text), runs five
 queries plus a negative control, and asserts the expected document comes back in the top two.
 `verify_search_live` does the same through the real route against a real project — search
 never writes, so it is safe to run any time. Both print one `ok`/`FAIL` line per assertion and
@@ -274,8 +283,8 @@ project afterwards using Graph Creation's read route.
 ### Check the routes without a server
 
 `app/graph_add/tools/verify_add_document.py` is an executable check of the two routes: it
-starts the real app in-process (in-memory repository, offline navigator), seeds a project
-that already contains files, then asserts the whole journey — suggestions, the walk, both
+starts the real app in-process (in-memory repository, offline describer), seeds a project
+that already contains files, then asserts the whole journey — suggestions, the scan, both
 placement modes, conflicts and renames, single use, expiry and ownership — printing one
 `ok`/`FAIL` line per assertion, then exiting non-zero if anything failed.
 
@@ -300,21 +309,21 @@ drives both routes, asserting the transcript before and after.
 ..\.venv\Scripts\python.exe -m app.graph_add.tools.verify_add_document_live `
   --project-id <uuid> --user <owner-uuid> --document ..\notes\rollback.md --suggest-only --expect guides
 
-# place it where the walk suggests
+# place it where the scan suggests
 ..\.venv\Scripts\python.exe -m app.graph_add.tools.verify_add_document_live `
   --project-id <uuid> --user <owner-uuid> --document ..\notes\rollback.md
 ```
 
 This one **writes**: one `files` row, one Storage object (content-addressed, so a duplicate
-document adds none) and a re-description of the target folder, its ancestors and the project
-— those are billed model calls. `--directory <path|id>` overrides the suggestion,
+document adds none) and a **single** model call that refreshes the descriptions of the target
+folder, its ancestors and the project. `--directory <path|id>` overrides the suggestion,
 `--placement new_directory --new-directory-name <name>` creates a folder first, `--file-name`
 resolves a clash, and `--json` dumps every payload. Exit codes: `0` placed, `1` a check
 failed, `2` the name is taken.
 
 > If Gemini answers `429 RESOURCE_EXHAUSTED`, the free-tier daily quota for that model is
 > spent. `GEMINI_MODEL=gemini-3.5-flash-lite` (a process-only override) usually still has
-> quota; the summaries stored on the project name the model that produced them.
+> quota; `description_model` on each folder row names the model that produced its text.
 
 ## Try it locally (upload a directory or a .zip)
 
@@ -343,7 +352,7 @@ Options: `--url`, `--mode new|add`, `--name`, `--project-id`, `--token` (Supabas
 bearer token; otherwise the `X-Dev-User-Id` header is sent), `--depth`, `--timeout`,
 `--interval`, `--json`, `--full`.
 
-`--dry-run` uses the offline mock summariser; a live run uses Gemini when
+`--dry-run` uses the offline mock describer; a live run uses Gemini when
 `GEMINI_API_KEY` is set. Either way the tree structure - empty-directory pruning,
 natural ordering, `ltree` paths - is identical to what the API stores.
 
@@ -354,18 +363,25 @@ natural ordering, `ltree` paths - is identical to what the API stores.
 2. **Tree** (`tree.py`) — builds the hierarchy, **drops empty directories**, sorts
    children case-insensitively and number-aware (`file2` before `file10`), and projects
    each path onto a sanitised `ltree` label (suffixes keep siblings unique).
-3. **Summarise** (`summarise.py`, `service.py`) — post-order: each file gets 1–2 sentences
-   from Gemini, then each directory is described from its child file summaries and child
-   directory descriptions, so the root describes the whole project.
-   `SUMMARIZER=auto` uses Gemini when `GEMINI_API_KEY` is set, otherwise a deterministic
-   offline mock — the pipeline runs (and tests pass) with no key and no network.
+3. **Describe** (`describe.py`, `service.py`) — post-order over the directories only. Each
+   prompt carries the **text** of the files directly inside the folder (each cut to
+   `DESCRIPTION_FILE_HEAD_CHARS`, the folder total capped by `DESCRIPTION_MAX_INPUT_CHARS`)
+   plus the descriptions of its child directories, so the root describes the whole project.
+   **Files are not summarised at all** — one model call per directory — and the prompt asks
+   for the words a reader would search for, because a local search matches this text to find
+   the folder. `SUMMARIZER=auto` uses Gemini when `GEMINI_API_KEY` is set, otherwise a
+   deterministic offline mock — the pipeline runs (and tests pass) with no key and no network.
 4. **Persist** (`repository.py`, `storage.py`) — blobs go to Storage under
    `{project_id}/{sha256}.md` (content-addressed: identical content is stored once, but
    every path still gets its own row), then `directories` are inserted one level at a time
-   so parent ids exist, then `files`.
+   so parent ids exist, then `files` (with `summary_status='skipped'`).
+
+Nothing is written until every description exists, so a failed run never leaves a
+half-described tree behind; only the job row records the failure.
 
 `mode=add` merges into the existing tree: existing directory paths are reused, new files
-are attached, then every affected ancestor (deepest first) is re-described and its child
+are attached, then every affected directory and its ancestors (deepest first) is re-described
+from the files' text — read back from Storage for the ones already there — and its child
 counts refreshed. Uploaded paths that already exist are rejected with `409`.
 
 ## Test & lint
@@ -377,7 +393,8 @@ counts refreshed. Uploaded paths that already exist are rejected with `409`.
 ```
 
 The suite is hermetic — settings are blanked, auth runs in dev mode, and the section tests
-use an in-memory repository, an in-memory object store and the mock summariser. Nothing
+use an in-memory repository, an in-memory object store and each section's mock describer (or,
+for search, the real local scorer). Nothing
 touches Supabase, Gemini or the network.
 
 ## Structure
@@ -389,28 +406,35 @@ app/
 ├─ core/auth.py       # get_current_user (dev header or Supabase bearer token)
 ├─ db/supabase.py     # admin_client() / anon_client(), reachability ping
 ├─ health/router.py
+├─ core/text.py       # shared vocabulary work: tokens, stems, scoring, excerpts
 ├─ graph_creation/    # SECTION — implemented
 │  ├─ router.py       # HTTP surface
-│  ├─ service.py      # orchestration: summarise → persist, add-mode merge, reads
+│  ├─ service.py      # orchestration: describe → persist, add-mode merge, reads
 │  ├─ tree.py         # validation, pruning, ordering, ltree paths
 │  ├─ ingest.py       # multipart / zip parsing and limits
 │  ├─ extract.py      # markdown → prompt text
-│  ├─ summarise.py    # Gemini + mock summarisers
+│  ├─ describe.py     # directory descriptions (Gemini + mock)
 │  ├─ storage.py      # Supabase Storage, content-addressed keys
 │  ├─ repository.py   # PostgREST access (protocol + Supabase implementation)
 │  └─ tests/
 ├─ graph_add/         # SECTION — implemented
 │  ├─ router.py       # HTTP surface (suggest → place)
-│  ├─ service.py      # orchestration, conflicts, ancestor refresh
-│  ├─ navigate.py     # bounded semantic walk + ranking contract
-│  ├─ llm.py          # Gemini + mock navigators
-│  ├─ prompts.py      # navigation / ranking / folder-description prompts
+│  ├─ service.py      # orchestration, conflicts, one-call description refresh
+│  ├─ navigate.py     # local folder ranking (no model call)
+│  ├─ scoring.py      # the document reduced to a compact query
+│  ├─ describer.py    # batched description refresh (Gemini + mock)
+│  ├─ prompts.py      # the single refresh prompt
 │  ├─ labels.py       # folder + file naming, ltree labels, rename suggestions
 │  ├─ extract.py      # markdown → prompt text
-│  ├─ storage.py      # content-addressed blob upload
+│  ├─ storage.py      # content-addressed blobs (put + get)
 │  ├─ repository.py   # PostgREST access (add_requests + tree writes)
 │  └─ tests/
-└─ graph_ai_search/   # SECTION — implemented (search the tree's summaries)
+└─ graph_ai_search/   # SECTION — implemented (local search: descriptions + document text)
+   ├─ search.py       # the walk: score folders, read documents, rank
+   ├─ scoring.py      # folder/document scoring (weights shared with Graph Add)
+   ├─ storage.py      # reads document bodies, digest-keyed LRU
+   ├─ router.py, service.py, schemas.py, repository.py
+   └─ tests/
 ```
 
 ## Configuration
@@ -425,15 +449,18 @@ All settings and defaults live in `app/core/config.py`; env var names are in
 | `AUTH_MODE`, `DEV_USER_ID` | `dev` trusts `X-Dev-User-Id`; `supabase` verifies the bearer token |
 | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` | Service role bypasses RLS — server-side only |
 | `STORAGE_BUCKET` | Bucket for uploaded markdown (default `project-files`) |
-| `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_THINKING_BUDGET` | Summarisation (and later Graph AI Search). `gemini-3.5-flash-lite` has the most free-tier quota; `gemini-3.5-flash` / `gemini-3.6-flash` answer 429 once it is spent. Use a positive budget (e.g. `512`) - the lite models reject `0` with 400 |
-| `SUMMARIZER`, `SUMMARY_MAX_INPUT_CHARS`, `SUMMARY_CONCURRENCY` | `auto` / `gemini` / `mock` |
+| `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_THINKING_BUDGET` | Directory descriptions only (creation, and the refresh after a placement). `gemini-3.5-flash-lite` has the most free-tier quota; `gemini-3.5-flash` / `gemini-3.6-flash` answer 429 once it is spent. Use a positive budget (e.g. `512`) - the lite models reject `0` with 400 |
+| `SUMMARIZER`, `SUMMARY_MAX_INPUT_CHARS` | `auto` / `gemini` / `mock`; the character cap when a document is read for a prompt |
+| `DESCRIPTION_FILE_HEAD_CHARS`, `DESCRIPTION_MAX_INPUT_CHARS` | How much of each file (1500) and of one folder (24000) reaches a description prompt |
+| `SCORING_FOLDER_THRESHOLD` | Share of a query a folder description must cover before a **search** opens that branch (0.25) |
+| `SEARCH_MAX_FILES_READ`, `SEARCH_MAX_DOCUMENT_CHARS`, `BLOB_CACHE_ENTRIES` | Search's read budget (200 documents), per-document cap (200k characters) and digest cache size (256) |
 | `MAX_UPLOAD_FILES`, `MAX_UPLOAD_BYTES`, `MAX_FILE_BYTES`, `MAX_DIRECTORY_DEPTH` | Upload limits |
 
 ## Known limitations
 
 - **Background jobs are in-process `asyncio` tasks.** Run a single uvicorn worker; a hard
   crash mid-job leaves that job row unfinished (no partial tree is ever written, because
-  every summary is produced before anything is inserted). A real queue is the next step
+  every description is produced before anything is inserted). A real queue is the next step
   if we need durability.
 - **The service-role client bypasses RLS,** so ownership is enforced in
   `GraphCreationService` (`_require_project`, `get_job`). The RLS policies in the

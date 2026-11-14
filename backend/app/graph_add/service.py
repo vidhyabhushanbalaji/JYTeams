@@ -23,6 +23,7 @@ from pathlib import PurePosixPath
 from fastapi import HTTPException, status
 
 from app.core.config import Settings
+from app.graph_add.describer import DocumentContext, FolderDescriber, TargetContext
 from app.graph_add.extract import extract_text
 from app.graph_add.labels import (
     NameValidationError,
@@ -36,13 +37,13 @@ from app.graph_add.labels import (
 )
 from app.graph_add.navigate import (
     ChildBrief,
-    Navigator,
     RankedLocation,
-    find_add_locations,
     natural_key,
+    score_folders,
 )
 from app.graph_add.repository import AddRepository, Row
 from app.graph_add.schemas import PlacementMode
+from app.graph_add.scoring import document_query
 from app.graph_add.storage import ObjectStore, content_hash
 
 logger = logging.getLogger(__name__)
@@ -50,23 +51,22 @@ logger = logging.getLogger(__name__)
 _MIME = "text/markdown"
 _MAX_IDENTICAL = 5
 _CONTAINS_LIMIT = 6
-_DEFAULT_TRAVERSAL = {
-    "expanded": 0,
-    "visited": 0,
-    "degraded": False,
-    "budget_exhausted": False,
-    "model": "",
+_PREVIEW_CHARS = 200
+_DEFAULT_SCAN = {
+    "folders_scored": 0,
+    "threshold": 0.0,
+    "scorer_version": "",
 }
 
 
 def _brief(row: Row, contains: Sequence[str] = ()) -> ChildBrief:
-    """Project a ``directories`` row onto what the navigator needs."""
+    """Project a ``directories`` row onto what the scanner needs."""
     return ChildBrief(
         directory_id=row["id"],
         path=str(row.get("path", "")),
         name=str(row.get("name", "")),
         depth=int(row.get("depth", 0)),
-        description=str(row.get("description") or "no description"),
+        description=str(row.get("description") or ""),
         direct_file_count=int(row.get("direct_file_count", 0)),
         child_directory_count=int(row.get("child_directory_count", 0)),
         contains=tuple(contains),
@@ -95,12 +95,6 @@ class _DocumentIndex:
     def file_rows(self, directory_id: str) -> list[Row]:
         return list(self._files_by_directory.get(directory_id, []))
 
-    def children_of(self, directory_id: str) -> list[ChildBrief]:
-        return [
-            _brief(row, self.contains_of(str(row["id"])))
-            for row in self._children.get(directory_id, [])
-        ]
-
     def contains_of(self, directory_id: str) -> tuple[str, ...]:
         """A few names of what sits directly inside a folder (subfolders first)."""
         names = [str(row.get("name", "")) for row in self.child_rows(directory_id)]
@@ -118,11 +112,13 @@ class _DocumentIndex:
                 break
         return tuple(picked)
 
-    def files_of(self, directory_id: str) -> list[tuple[str, str]]:
-        return [
-            (str(row["name"]), str(row.get("summary") or ""))
-            for row in self._files_by_directory.get(directory_id, [])
+    def corpus(self) -> list[str]:
+        """The project's own vocabulary, used to weight rare terms in the document."""
+        texts = [
+            f"{row.get('name', '')} {row.get('description') or ''}" for row in self.directories
         ]
+        texts.extend(str(row.get("path", "")) for row in self.files)
+        return texts
 
     def file_names(self, directory_id: str) -> list[str]:
         return [str(row["name"]) for row in self._files_by_directory.get(directory_id, [])]
@@ -151,18 +147,18 @@ class GraphAddService:
         *,
         repository: AddRepository,
         store: ObjectStore,
-        navigator: Navigator,
+        describer: FolderDescriber,
         settings: Settings,
     ) -> None:
         self._repository = repository
         self._store = store
-        self._navigator = navigator
+        self._describer = describer
         self._settings = settings
 
     # ---------------------------------------------------------------- suggest
 
     async def suggest(self, *, owner_id: str, project_id: str, filename: str, data: bytes) -> Row:
-        """Summarise the document and return the ranked places it could go."""
+        """Rank the folders this document could join — locally, with no model call."""
         name = self._document_name(filename)
         extracted = extract_text(
             data, filename=name, max_chars=self._settings.summary_max_input_chars
@@ -182,15 +178,14 @@ class GraphAddService:
                 detail="This project has no directory tree to add to yet.",
             )
 
-        summary = await self._summarise(name, extracted.text or "")
-        traversal = await find_add_locations(
-            root=_brief(root_row, index.contains_of(str(root_row["id"]))),
-            children_of=index.children_of,
-            files_of=index.files_of,
-            summary=summary,
+        text = extracted.text or ""
+        scan = score_folders(
+            folders=[_brief(row, index.contains_of(str(row["id"]))) for row in index.directories],
+            query=document_query(file_name=name, text=text, corpus=index.corpus()),
             file_name=name,
-            navigator=self._navigator,
+            root_id=str(root_row["id"]),
         )
+        preview = self._preview(name, text)
 
         digest = content_hash(data)
         stored = await self._store.put(
@@ -198,7 +193,7 @@ class GraphAddService:
         )
         suggestions = [
             self._suggestion(location, index=index, file_name=name, digest=digest, rank=rank)
-            for rank, location in enumerate(traversal.locations, start=1)
+            for rank, location in enumerate(scan.locations, start=1)
         ]
         request = await self._repository.create_add_request(
             {
@@ -210,10 +205,12 @@ class GraphAddService:
                 "mime_type": _MIME,
                 "storage_bucket": stored.bucket,
                 "storage_path": stored.path,
-                "summary": summary,
-                "summary_model": self._navigator.model_name,
+                # The column predates model-free suggestions: it now holds the preview.
+                "summary": preview,
+                "summary_model": scan.scorer_version,
                 "suggestions": suggestions,
-                "traversal": traversal.as_dict(self._navigator.model_name),
+                # The column predates model-free suggestions: it now holds the scan summary.
+                "traversal": scan.as_dict(),
             }
         )
         return {
@@ -225,11 +222,17 @@ class GraphAddService:
                 "name": name,
                 "size_bytes": len(data),
                 "content_sha256": digest,
-                "summary": summary,
+                "preview": preview,
             },
             "suggestions": suggestions,
-            "traversal": traversal.as_dict(self._navigator.model_name),
+            "scan": scan.as_dict(),
         }
+
+    @staticmethod
+    def _preview(name: str, text: str) -> str:
+        """A short, model-free preview of the document (the wizard shows it to the user)."""
+        collapsed = " ".join(text.split())
+        return collapsed[:_PREVIEW_CHARS] or name
 
     def _suggestion(
         self,
@@ -256,6 +259,7 @@ class GraphAddService:
             "child_directory_count": node.child_directory_count,
             "is_leaf": node.is_leaf,
             "reason": location.reason,
+            "matched_terms": list(location.matched),
             "proposed_new_directory_names": list(location.folder_names),
             "name_available": available,
             "suggested_file_names": (
@@ -365,8 +369,6 @@ class GraphAddService:
                 target=target,
                 index=index,
                 folder=folder,
-                file_name=name,
-                summary=str(request["summary"]),
             )
             directory_row = created
         else:
@@ -383,16 +385,17 @@ class GraphAddService:
                 "mime_type": str(request.get("mime_type") or _MIME),
                 "storage_bucket": str(request["storage_bucket"]),
                 "storage_path": str(request["storage_path"]),
-                "summary": str(request["summary"]),
-                "summary_status": "ok",
-                "summary_model": request.get("summary_model"),
+                # Documents are not summarised: the folder around them is described instead.
+                "summary": None,
+                "summary_status": "skipped",
+                "summary_model": None,
             }
         )
 
         index = await self._load_index(project_id)
-        if created is not None:
-            await self._recount(str(created["id"]), index)
-        refreshed = await self._refresh_from(project_id, target, index)
+        refreshed = await self._refresh_descriptions(
+            project_id=project_id, request=request, directory_row=directory_row, index=index
+        )
         await self._repository.update_add_request(
             request_id, {"status": "placed", "placed_file_id": inserted["id"]}
         )
@@ -409,8 +412,7 @@ class GraphAddService:
                 "path": inserted["path"],
                 "directory_id": inserted["directory_id"],
                 "size_bytes": int(inserted.get("size_bytes", 0)),
-                "summary": inserted.get("summary"),
-                "summary_status": inserted.get("summary_status", "ok"),
+                "summary_status": inserted.get("summary_status", "skipped"),
                 "storage_bucket": inserted.get("storage_bucket"),
                 "storage_path": inserted.get("storage_path"),
             },
@@ -434,11 +436,11 @@ class GraphAddService:
                 "name": row["file_name"],
                 "size_bytes": int(row.get("size_bytes", 0)),
                 "content_sha256": row["content_sha256"],
-                "summary": row["summary"],
+                "preview": row["summary"],
             },
             "suggestions": row.get("suggestions") or [],
-            "traversal": row.get("traversal")
-            or {**_DEFAULT_TRAVERSAL, "model": str(row.get("summary_model") or "")},
+            "scan": row.get("traversal")
+            or {**_DEFAULT_SCAN, "scorer_version": str(row.get("summary_model") or "")},
         }
 
     # ---------------------------------------------------------------- helpers
@@ -450,15 +452,13 @@ class GraphAddService:
         target: Row,
         index: _DocumentIndex,
         folder: str,
-        file_name: str,
-        summary: str,
     ) -> Row:
-        """Create the folder the user asked for, described from its one file.
+        """Create the folder the user asked for.
 
-        The caller has already checked that the path is free, so this only writes.
+        It is written without a description; the single refresh call below fills it in along with
+        its parent chain, so the caller already checked that the path is free.
         """
         path = child_path(str(target.get("path", "")), folder)
-        description = await self._describe(path, files=[(file_name, summary)], directories=[])
         return await self._repository.insert_directory(
             {
                 "project_id": project_id,
@@ -467,84 +467,97 @@ class GraphAddService:
                 "path": path,
                 "ltree_path": self._ltree_path(target, folder, index),
                 "depth": int(target.get("depth", 0)) + 1,
-                "description": description,
-                "description_model": self._navigator.model_name,
+                "description": None,
+                "description_model": None,
                 "direct_file_count": 0,
                 "child_directory_count": 0,
             }
         )
 
-    async def _describe(
+    async def _refresh_descriptions(
         self,
-        path: str,
         *,
-        files: Sequence[tuple[str, str]],
-        directories: Sequence[tuple[str, str]],
-    ) -> str:
+        project_id: str,
+        request: Row,
+        directory_row: Row,
+        index: _DocumentIndex,
+    ) -> int:
+        """Update every folder the placement touched, in ONE model call.
+
+        The targets are the folder that received the document (which may be the new folder) and
+        its ancestors, deepest first. A failure leaves the existing descriptions untouched: a
+        stale description is better than a failed placement.
+        """
+        chain = [directory_row, *self._ancestors(directory_row, index)]
+        targets = [self._target(row, index) for row in chain]
+        document = DocumentContext(
+            name=str(request["file_name"]),
+            directory_path=str(directory_row.get("path", "")),
+            text=await self._document_text(request),
+        )
         try:
-            return await self._navigator.describe_folder(
-                path=path, files=files, directories=directories
+            updates = await self._describer.update_descriptions(document=document, targets=targets)
+        except Exception as exc:  # noqa: BLE001 - a stale description beats a failed placement
+            logger.warning(
+                "Could not refresh the descriptions around %r: %s",
+                document.directory_path or "<root>",
+                exc,
             )
-        except Exception as exc:  # noqa: BLE001 - a missing description must not block
-            logger.warning("Could not describe %r: %s", path or "<root>", exc)
-            return "Description unavailable."
+            updates = {}
 
-    async def _refresh_from(self, project_id: str, start: Row, index: _DocumentIndex) -> int:
-        """Re-describe ``start`` and its ancestors, deepest first."""
         refreshed = 0
-        current = index.by_id.get(str(start["id"])) or start
-        for row in [current, *self._ancestors(current, index)]:
-            directory_id = str(row["id"])
-            file_pairs = [
-                (str(item["name"]), str(item.get("summary") or ""))
-                for item in index.file_rows(directory_id)
-            ]
-            directory_pairs = [
-                (str(item["name"]), str(item.get("description") or "no description"))
-                for item in index.child_rows(directory_id)
-            ]
-            try:
-                text = await self._navigator.describe_folder(
-                    path=str(row.get("path", "")),
-                    files=file_pairs,
-                    directories=directory_pairs,
-                )
-            except Exception as exc:  # noqa: BLE001 - keep refreshing the rest
-                logger.warning(
-                    "Could not refresh the description of %r: %s",
-                    row.get("path") or "<root>",
-                    exc,
-                )
-                continue
-
+        for row, target in zip(chain, targets, strict=True):
             counts = {
-                "direct_file_count": len(file_pairs),
-                "child_directory_count": len(directory_pairs),
+                "direct_file_count": len(index.file_rows(str(row["id"]))),
+                "child_directory_count": len(index.child_rows(str(row["id"]))),
             }
-            await self._repository.update_directory(
-                directory_id,
-                {
-                    "description": text,
-                    "description_model": self._navigator.model_name,
-                    **counts,
-                },
-            )
-            row.update(counts)
-            row["description"] = text
+            payload: Row = dict(counts)
+            text = updates.get(target.path)
+            if text:
+                payload["description"] = text
+                payload["description_model"] = self._describer.model_name
+            await self._repository.update_directory(str(row["id"]), payload)
+            row.update(payload)
             refreshed += 1
             if not row.get("path"):
-                await self._repository.update_project(project_id, {"description": text})
+                root_description = text or str(row.get("description") or "")
+                await self._repository.update_project(
+                    project_id, {"description": root_description or None}
+                )
         return refreshed
 
-    async def _recount(self, directory_id: str, index: _DocumentIndex) -> None:
-        """Fix the child counts of a folder whose description is already current."""
-        await self._repository.update_directory(
-            directory_id,
-            {
-                "direct_file_count": len(index.file_rows(directory_id)),
-                "child_directory_count": len(index.child_rows(directory_id)),
-            },
+    @staticmethod
+    def _target(row: Row, index: _DocumentIndex) -> TargetContext:
+        """What the describer needs to know about one folder."""
+        directory_id = str(row["id"])
+        return TargetContext(
+            path=str(row.get("path", "")),
+            current_description=str(row.get("description") or ""),
+            files=tuple(str(item["name"]) for item in index.file_rows(directory_id)),
+            subfolders=tuple(
+                (str(item.get("name", "")), str(item.get("description") or ""))
+                for item in index.child_rows(directory_id)
+            ),
         )
+
+    async def _document_text(self, request: Row) -> str:
+        """The placed document's text, read back from storage for the description update."""
+        path = str(request.get("storage_path") or "")
+        if not path:
+            return ""
+        try:
+            data = await self._store.get(
+                bucket=str(request.get("storage_bucket") or self._store.bucket), path=path
+            )
+        except Exception as exc:  # noqa: BLE001 - the update still runs, with less context
+            logger.warning("Could not read %s for the description update: %s", path, exc)
+            return ""
+        extracted = extract_text(
+            data,
+            filename=str(request.get("file_name") or ""),
+            max_chars=self._settings.description_max_input_chars,
+        )
+        return extracted.text or ""
 
     @staticmethod
     def _ancestors(start: Row, index: _DocumentIndex) -> list[Row]:
@@ -601,16 +614,6 @@ class GraphAddService:
         except NameValidationError as exc:
             raise HTTPException(
                 status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc)
-            ) from exc
-
-    async def _summarise(self, name: str, text: str) -> str:
-        try:
-            return await self._navigator.summarise_file(name=name, text=text)
-        except Exception as exc:  # noqa: BLE001 - surfaced as a retryable 502
-            logger.warning("Could not summarise %r: %s", name, exc)
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="The document could not be summarised; try again.",
             ) from exc
 
     async def _require_project(self, project_id: str, owner_id: str) -> Row:

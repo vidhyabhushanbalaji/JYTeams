@@ -1,22 +1,22 @@
-"""Find documents by walking the tree, guided by the stored summaries.
+"""Find documents by walking the tree, scored locally — no model calls.
 
-The agreed rule: start at the root, log every child file whose summary matches the query,
-and recurse into every child folder whose description matches, until the frontier is empty.
-There is deliberately **no expansion budget** — the walk exhausts itself — so the cost is
-proportional to how much of the tree the model considers relevant.
+The shape is the one Graph AI Search already had: start at the root, log the files whose content
+matches the query, and open every child folder whose description matches, until the frontier is
+empty. What changed is *who decides*: a deterministic scorer (:mod:`app.graph_ai_search.scoring`,
+built on :mod:`app.core.text`) replaces the per-folder model call, so a search costs no prompts
+and no quota.
 
-Two things keep that honest:
+Descriptions are the cheap index — opening a branch costs one comparison over rows already in
+memory — while document bodies are the expensive part, so a body is read only for a folder that
+was actually opened. Three things bound that:
 
-* ``max_directories`` is an *optional* valve. Leaving it unset means unbounded; setting it
-  stops the walk and reports ``budget_exhausted``.
-* when the walk logs nothing and the project is small (``FALLBACK_MAX_PROJECT_FILES``), every
-  folder is swept once, so a folder with a vague description cannot hide its files.
+* ``folder_threshold`` prunes a branch whose description shares nothing with the query;
+* ``max_files_read`` caps how many documents one search may open;
+* ``max_directories`` is the optional valve a caller can use to stop the walk early.
 
-Ranking happens once at the end, in batches when the log is large, because scores produced
-in separate model calls are not comparable with each other.
-
-The module holds no database or transport code: callers pass lookup callables, which keeps
-the walk unit-testable with plain dictionaries.
+Scores from one scorer are comparable by construction, so the old consolidation call is gone:
+ranking is a sort. The module holds no database, storage or transport code — callers pass lookup
+callables and a ``read_body`` coroutine, which keeps the walk testable with plain dictionaries.
 """
 
 from __future__ import annotations
@@ -25,29 +25,40 @@ import heapq
 import itertools
 import logging
 import re
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from app.core.text import Query, excerpt
+
 logger = logging.getLogger(__name__)
 
-#: Documents ranked per model call. Must stay **at least** the maximum result count the API
-#: allows (25), so the consolidation pass can never drop a document a caller could ask for.
-RANK_BATCH = 25
-#: Projects at or below this many documents get the whole-tree fallback sweep.
+#: Folder relevance at or above this opens the branch. With the default weights this means
+#: "the description covers roughly a third of the query, or the names inside nearly cover it".
+DEFAULT_FOLDER_THRESHOLD = 0.2
+#: Below this, a search has only weak matches, so a small project gets the sweep. Descriptions
+#: cannot mention every technology a branch holds, and a branch wrongly pruned hides its files.
+WEAK_MATCH_THRESHOLD = 0.5
+#: Documents one search may open, so a cold cache cannot turn into hundreds of downloads.
+MAX_FILES_READ = 200
+#: Projects at or below this many documents get the whole-tree sweep when nothing matched.
 FALLBACK_MAX_PROJECT_FILES = 40
+#: Characters of a matching document returned as evidence.
+EXCERPT_CHARS = 200
 
 
 @dataclass(frozen=True)
 class DocumentBrief:
-    """One file, as the search sees it."""
+    """One file, as the search sees it: identity plus where its bytes live."""
 
     file_id: str
     name: str
     path: str
     directory_id: str
     directory_path: str
-    summary: str
+    storage_bucket: str = ""
+    storage_path: str = ""
+    content_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -65,99 +76,85 @@ class FolderBrief:
 
 
 @dataclass(frozen=True)
-class DocumentMatch:
-    """A file the searcher judged relevant, and why."""
+class FolderScore:
+    """The scorer's verdict on one folder."""
 
-    file_id: str
-    relevance: float
-    reason: str = ""
+    score: float
+    matched: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DocumentScore:
+    """The scorer's verdict on one document."""
+
+    score: float
+    matched: tuple[str, ...] = ()
+
+
+class Scorer(Protocol):
+    """What the walk needs from a scorer (the real one, or a scripted one in tests)."""
+
+    version: str
+
+    def score_folder(self, query: Query, folder: FolderBrief) -> FolderScore: ...
+
+    def score_document(self, query: Query, document: DocumentBrief, body: str) -> DocumentScore: ...
 
 
 @dataclass(frozen=True)
 class FolderMatch:
-    """A subfolder the searcher judged worth opening, and why."""
+    """A relevant folder, reported so a client can browse instead of guess."""
 
     directory_id: str
-    relevance: float
-    reason: str = ""
-
-
-@dataclass(frozen=True)
-class FolderVerdicts:
-    """Everything one folder's turn in the walk produced."""
-
-    documents: tuple[DocumentMatch, ...] = ()
-    folders: tuple[FolderMatch, ...] = ()
-
-
-@dataclass(frozen=True)
-class LoggedFile:
-    """A file logged during the walk, with the relevance that got it there."""
-
-    document: DocumentBrief
-    relevance: float
-    reason: str = ""
-
-
-@dataclass(frozen=True)
-class FileRank:
-    """Where the consolidation call placed one logged file."""
-
-    file_id: str
+    path: str
+    name: str
+    depth: int
     score: float
-    reason: str = ""
+    matched: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
-class RankedFile:
-    """A final result."""
+class FileMatch:
+    """A document that answers the query, with the evidence that got it there."""
 
     document: DocumentBrief
     score: float
-    reason: str
-
-
-class Searcher(Protocol):
-    """What the walk needs from a searcher (Gemini or the offline mock)."""
-
-    model_name: str
-
-    async def judge(
-        self,
-        *,
-        query: str,
-        folder: FolderBrief,
-        documents: Sequence[DocumentBrief],
-        folders: Sequence[FolderBrief],
-    ) -> FolderVerdicts: ...
-
-    async def rank(self, *, query: str, documents: Sequence[LoggedFile]) -> Sequence[FileRank]: ...
+    matched: tuple[str, ...] = ()
+    excerpt: str = ""
 
 
 @dataclass
 class SearchOutcome:
     """The ranked results plus what the walk cost."""
 
-    results: list[RankedFile] = field(default_factory=list)
+    results: list[FileMatch] = field(default_factory=list)
+    directories: list[FolderMatch] = field(default_factory=list)
     opened: list[str] = field(default_factory=list)
     visited: int = 0
     documents_considered: int = 0
+    files_read: int = 0
     fallback_used: bool = False
     degraded: bool = False
     budget_exhausted: bool = False
-    model: str = ""
+    scorer_version: str = ""
 
-    def traversal(self) -> dict[str, object]:
+    def traversal(self, *, duration_ms: int = 0) -> dict[str, object]:
         """Serialisable summary for the response."""
         return {
             "directories_visited": self.visited,
             "directories_opened": len(self.opened),
             "documents_considered": self.documents_considered,
+            "files_read": self.files_read,
             "fallback_used": self.fallback_used,
             "degraded": self.degraded,
             "budget_exhausted": self.budget_exhausted,
-            "model": self.model,
+            "scorer_version": self.scorer_version,
+            "duration_ms": duration_ms,
         }
+
+
+#: Reads one document's text; the service supplies this so the walk stays storage-agnostic.
+ReadBody = Callable[[DocumentBrief], Awaitable[str]]
 
 
 def natural_key(value: str) -> tuple:
@@ -179,95 +176,34 @@ def all_folders(
         yield from all_folders(child, children_of)
 
 
-def _log(logged: dict[str, LoggedFile], document: DocumentBrief, match: DocumentMatch) -> None:
-    """Keep the best relevance seen for a file."""
-    if match.relevance <= 0:
-        return
-    previous = logged.get(document.file_id)
-    if previous is None or match.relevance > previous.relevance:
-        logged[document.file_id] = LoggedFile(
-            document=document,
-            relevance=min(1.0, match.relevance),
-            reason=match.reason or "Matched the query.",
-        )
-
-
-def _apply_ranks(documents: Sequence[LoggedFile], ranks: Sequence[FileRank]) -> list[RankedFile]:
-    """Pair the model's ranking with the documents it was shown."""
-    by_id = {item.document.file_id: item for item in documents}
-    seen: set[str] = set()
-    ranked: list[RankedFile] = []
-    for rank in ranks:
-        item = by_id.get(rank.file_id)
-        if item is None or rank.file_id in seen:
-            continue
-        seen.add(rank.file_id)
-        ranked.append(
-            RankedFile(
-                document=item.document,
-                score=min(1.0, max(0.0, rank.score)),
-                reason=rank.reason or item.reason,
-            )
-        )
-    # A document the model forgot is kept at the bottom rather than silently dropped.
-    ranked.extend(
-        RankedFile(document=item.document, score=0.0, reason=item.reason)
-        for item in documents
-        if item.document.file_id not in seen
-    )
-    return ranked
-
-
-async def _rank(
-    *,
-    query: str,
-    documents: Sequence[LoggedFile],
-    searcher: Searcher,
-    batch_size: int,
-) -> list[RankedFile]:
-    """Rank the log, batching large logs and consolidating the winners."""
-    batches = [
-        list(documents[start : start + batch_size])
-        for start in range(0, len(documents), batch_size)
-    ]
-    if len(batches) == 1:
-        return _apply_ranks(batches[0], await searcher.rank(query=query, documents=batches[0]))
-
-    scored: list[RankedFile] = []
-    for batch in batches:
-        scored.extend(_apply_ranks(batch, await searcher.rank(query=query, documents=batch)))
-    scored.sort(key=lambda item: (-item.score, natural_key(item.document.path)))
-
-    finalists = scored[:batch_size]
-    if len(finalists) <= 1:
-        return finalists
-    # Batch scores are not comparable, so the survivors get one final pass.
-    final_documents = [LoggedFile(item.document, item.score, item.reason) for item in finalists]
-    return _apply_ranks(
-        final_documents, await searcher.rank(query=query, documents=final_documents)
-    )
-
-
 async def find_matching_files(
     *,
     root: FolderBrief,
     documents_of: Callable[[str], Sequence[DocumentBrief]],
     children_of: Callable[[str], Sequence[FolderBrief]],
-    query: str,
-    searcher: Searcher,
+    read_body: ReadBody,
+    query: Query,
+    scorer: Scorer,
     total_documents: int,
     max_directories: int | None = None,
     fallback_limit: int = FALLBACK_MAX_PROJECT_FILES,
-    batch_size: int = RANK_BATCH,
+    folder_threshold: float = DEFAULT_FOLDER_THRESHOLD,
+    weak_match_threshold: float = WEAK_MATCH_THRESHOLD,
+    max_files_read: int = MAX_FILES_READ,
 ) -> SearchOutcome:
-    """Walk the tree, log the matching files, and rank them against the query."""
-    outcome = SearchOutcome(model=searcher.model_name)
-    logged: dict[str, LoggedFile] = {}
+    """Walk the tree, score the documents in every opened folder, and rank the matches."""
+    outcome = SearchOutcome(scorer_version=scorer.version)
+    logged: dict[str, FileMatch] = {}
+    folders: dict[str, FolderMatch] = {}
     counter = itertools.count()
     frontier: list[tuple[float, tuple, int, FolderBrief]] = [
         (-1.0, natural_key(root.path), next(counter), root)
     ]
     seen: set[str] = {root.directory_id}
+
+    root_verdict = scorer.score_folder(query, root)
+    if root_verdict.score > 0:
+        _remember(folders, root, root_verdict, threshold=0.0)
 
     while frontier:
         if max_directories is not None and len(outcome.opened) >= max_directories:
@@ -277,89 +213,86 @@ async def find_matching_files(
 
         _, _, _, folder = heapq.heappop(frontier)
         outcome.visited += 1
+        outcome.opened.append(folder.path)
+
         documents = list(documents_of(folder.directory_id))
-        folders = list(children_of(folder.directory_id))
         outcome.documents_considered += len(documents)
 
-        try:
-            verdicts = await searcher.judge(
-                query=query, folder=folder, documents=documents, folders=folders
-            )
-        except Exception as exc:  # noqa: BLE001 - one bad folder must not sink the search
-            logger.warning("Could not search %r: %s", folder.path or "<root>", exc)
-            outcome.degraded = True
-            continue
-
-        outcome.opened.append(folder.path)
-        by_file = {item.file_id: item for item in documents}
-        for match in verdicts.documents:
-            document = by_file.get(match.file_id)
-            if document is not None:
-                _log(logged, document, match)
-
-        by_folder = {item.directory_id: item for item in folders}
-        for match in verdicts.folders:
-            child = by_folder.get(match.directory_id)
-            if child is None or match.relevance <= 0 or child.directory_id in seen:
+        for child in children_of(folder.directory_id):
+            verdict = scorer.score_folder(query, child)
+            if verdict.score < folder_threshold:
+                continue
+            _remember(folders, child, verdict, threshold=folder_threshold)
+            if child.directory_id in seen:
                 continue
             seen.add(child.directory_id)
             heapq.heappush(
-                frontier,
-                (-match.relevance, natural_key(child.path), next(counter), child),
+                frontier, (-verdict.score, natural_key(child.path), next(counter), child)
             )
 
-    # The sweep is the safety net for a vague description, not a second budget: a caller who
-    # asked for a bounded walk must not get an unbounded one behind their back.
+        for document in documents:
+            if outcome.files_read >= max_files_read:
+                outcome.budget_exhausted = True
+                logger.info("Stopped after %s documents (max_files_read)", outcome.files_read)
+                break
+            await _score_and_log(
+                document=document,
+                query=query,
+                scorer=scorer,
+                read_body=read_body,
+                outcome=outcome,
+                logged=logged,
+            )
+
+    # The sweep rescues a search that only found weak matches: a folder description cannot name
+    # every technology its branch contains, so a small project must not hide its files behind one
+    # vague sentence. It is not a second budget: a caller who asked for a bounded walk keeps a
+    # bounded walk.
+    best = max((item.score for item in logged.values()), default=0.0)
     if (
-        not logged
+        best < weak_match_threshold
         and max_directories is None
         and total_documents
-        and (total_documents <= fallback_limit)
+        and total_documents <= fallback_limit
     ):
-        await _fallback(
+        await _sweep(
             root=root,
             documents_of=documents_of,
             children_of=children_of,
+            read_body=read_body,
             query=query,
-            searcher=searcher,
+            scorer=scorer,
             outcome=outcome,
             logged=logged,
+            folders=folders,
+            folder_threshold=folder_threshold,
+            max_files_read=max_files_read,
         )
 
-    documents = sorted(
-        logged.values(), key=lambda item: (-item.relevance, natural_key(item.document.path))
+    outcome.results = sorted(
+        logged.values(), key=lambda item: (-item.score, natural_key(item.document.path))
     )
-    if not documents:
-        return outcome
-
-    try:
-        ranked = await _rank(
-            query=query, documents=documents, searcher=searcher, batch_size=batch_size
-        )
-    except Exception as exc:  # noqa: BLE001 - fall back to the per-folder relevance
-        logger.warning("Could not rank search results: %s", exc)
-        outcome.degraded = True
-        ranked = [
-            RankedFile(document=item.document, score=item.relevance, reason=item.reason)
-            for item in documents
-        ]
-
-    ranked.sort(key=lambda item: (-item.score, natural_key(item.document.path)))
-    outcome.results = ranked
+    outcome.directories = sorted(
+        folders.values(), key=lambda item: (-item.score, natural_key(item.path))
+    )
     return outcome
 
 
-async def _fallback(
+async def _sweep(
     *,
     root: FolderBrief,
     documents_of: Callable[[str], Sequence[DocumentBrief]],
     children_of: Callable[[str], Sequence[FolderBrief]],
-    query: str,
-    searcher: Searcher,
+    read_body: ReadBody,
+    query: Query,
+    scorer: Scorer,
     outcome: SearchOutcome,
-    logged: dict[str, LoggedFile],
+    logged: dict[str, FileMatch],
+    folders: dict[str, FolderMatch],
+    folder_threshold: float,
+    max_files_read: int,
 ) -> None:
-    """Sweep every folder once: small projects cannot afford a hidden branch."""
+    """Read every folder's documents once: a vague description must not hide a branch."""
     outcome.fallback_used = True
     already = set(outcome.opened)
     for folder in all_folders(root, children_of):
@@ -369,17 +302,68 @@ async def _fallback(
         outcome.documents_considered += len(documents)
         if not documents:
             continue
-        try:
-            verdicts = await searcher.judge(
-                query=query, folder=folder, documents=documents, folders=[]
-            )
-        except Exception as exc:  # noqa: BLE001 - the sweep is best effort
-            logger.warning("Fallback sweep failed at %r: %s", folder.path, exc)
-            outcome.degraded = True
-            continue
         outcome.opened.append(folder.path)
-        by_file = {item.file_id: item for item in documents}
-        for match in verdicts.documents:
-            document = by_file.get(match.file_id)
-            if document is not None:
-                _log(logged, document, match)
+        _remember(folders, folder, scorer.score_folder(query, folder), threshold=folder_threshold)
+        for document in documents:
+            if outcome.files_read >= max_files_read:
+                outcome.budget_exhausted = True
+                return
+            await _score_and_log(
+                document=document,
+                query=query,
+                scorer=scorer,
+                read_body=read_body,
+                outcome=outcome,
+                logged=logged,
+            )
+
+
+async def _score_and_log(
+    *,
+    document: DocumentBrief,
+    query: Query,
+    scorer: Scorer,
+    read_body: ReadBody,
+    outcome: SearchOutcome,
+    logged: dict[str, FileMatch],
+) -> None:
+    """Read one document, score it against its own text, and keep it if it matches."""
+    try:
+        body = await read_body(document)
+    except Exception as exc:  # noqa: BLE001 - one unreadable file must not sink the search
+        logger.warning("Could not read %r: %s", document.path, exc)
+        outcome.degraded = True
+        return
+    outcome.files_read += 1
+    verdict = scorer.score_document(query, document, body)
+    if verdict.score <= 0:
+        return
+    previous = logged.get(document.file_id)
+    if previous is not None and previous.score >= verdict.score:
+        return
+    logged[document.file_id] = FileMatch(
+        document=document,
+        score=min(1.0, verdict.score),
+        matched=verdict.matched,
+        excerpt=excerpt(body, verdict.matched or query.terms, width=EXCERPT_CHARS),
+    )
+
+
+def _remember(
+    target: dict[str, FolderMatch],
+    folder: FolderBrief,
+    verdict: FolderScore,
+    *,
+    threshold: float,
+) -> None:
+    """Keep a folder in the reported list when it clears the threshold."""
+    if verdict.score < threshold:
+        return
+    target[folder.directory_id] = FolderMatch(
+        directory_id=folder.directory_id,
+        path=folder.path,
+        name=folder.name,
+        depth=folder.depth,
+        score=min(1.0, verdict.score),
+        matched=verdict.matched,
+    )

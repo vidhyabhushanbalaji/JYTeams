@@ -14,7 +14,7 @@ project tree that already holds files, and drives ``POST /suggestions`` →
 exit code is the result: 0 when all checks pass, 1 otherwise.
 
 No services are touched: the section's in-memory repository and object store stand in for
-Supabase, and the offline ``MockNavigator`` replaces Gemini — the same collaborators the
+Supabase, and the offline ``MockFolderDescriber`` replaces Gemini — the same collaborators the
 test suite uses. That makes this a runnable smoke test on a machine with no ``.env``, and a
 readable demo of the contract (``--json`` dumps the payloads and the final tree).
 
@@ -41,7 +41,7 @@ if __package__ in {None, ""}:
 from fastapi.testclient import TestClient
 
 from app.core.config import get_settings
-from app.graph_add.llm import MockNavigator
+from app.graph_add.describer import MockFolderDescriber
 from app.graph_add.router import get_service
 from app.graph_add.service import GraphAddService
 from app.graph_add.tests.fakes import InMemoryAddRepository, InMemoryObjectStore
@@ -63,7 +63,7 @@ RESPONSE_KEYS = {
     "expires_at",
     "file",
     "suggestions",
-    "traversal",
+    "scan",
 }
 SUGGESTION_KEYS = {
     "rank",
@@ -77,6 +77,7 @@ SUGGESTION_KEYS = {
     "child_directory_count",
     "is_leaf",
     "reason",
+    "matched_terms",
     "proposed_new_directory_names",
     "name_available",
     "suggested_file_names",
@@ -176,7 +177,7 @@ def build_client(repository: InMemoryAddRepository) -> TestClient:
     service = GraphAddService(
         repository=repository,
         store=InMemoryObjectStore(),
-        navigator=MockNavigator(),
+        describer=MockFolderDescriber(),
         settings=get_settings(),
     )
     application = create_app()
@@ -233,18 +234,18 @@ def check_suggestions(
         all(set(item) == SUGGESTION_KEYS for item in payload["suggestions"]),
     )
     paths = [item["path"] for item in payload["suggestions"]]
-    report.check("the walk lands on docs/auth", paths[0] == "docs/auth", paths)
+    report.check("the scan lands on docs/auth", paths[0] == "docs/auth", paths)
     report.check("the project root is offered last", paths[-1] == "", paths)
     report.check(
         "ranks run 1..n",
         [item["rank"] for item in payload["suggestions"]] == list(range(1, len(paths) + 1)),
     )
     report.check(
-        "the walk reports what it cost",
-        payload["traversal"]["model"] == "mock" and payload["traversal"]["degraded"] is False,
-        payload["traversal"],
+        "the scan reports what it cost, without a model call",
+        payload["scan"]["folders_scored"] >= 1 and bool(payload["scan"]["scorer_version"]),
+        payload["scan"],
     )
-    report.check("the document summary is returned", bool(payload["file"]["summary"]))
+    report.check("the document preview is returned", bool(payload["file"]["preview"]))
     return payload
 
 

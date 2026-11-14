@@ -40,7 +40,8 @@ Row = dict[str, Any]
 
 SEARCH = "/api/graph-ai-search/projects/{project_id}/search"
 
-#: (query, the document that must be in the top two). Natural phrasing: Gemini judges.
+#: (query, the document that must be in the top two). Matching is local, so a case only passes
+#: if the project's own descriptions and documents use this vocabulary.
 CASES = [
     ("how do I roll back a bad production release", "guides/rollback-deployment.md"),
     (
@@ -59,9 +60,9 @@ HIT_KEYS = {
     "path",
     "directory_id",
     "directory_path",
-    "summary",
     "score",
-    "reason",
+    "matched_terms",
+    "excerpt",
 }
 
 
@@ -94,7 +95,7 @@ class Report:
 
 
 def build_client(args: argparse.Namespace) -> TestClient:
-    """The real app; model calls take seconds, so the timeout is generous."""
+    """The real app; a cold search reads documents, so the timeout is generous."""
     client = TestClient(create_app())
     client.timeout = httpx2.Timeout(args.timeout)
     if args.token:
@@ -114,15 +115,18 @@ def print_payload(payload: Row) -> None:
     if not hits:
         print("      (no documents matched)")
     for rank, hit in enumerate(hits, start=1):
-        print(f"      {rank}. {hit['score']:.2f}  {hit['path']}")
-        print(f"         {hit['reason']}")
+        terms = ", ".join(hit["matched_terms"]) or "name only"
+        print(f"      {rank}. {hit['score']:.2f}  {hit['path']}  [{terms}]")
+        print(f"         {hit['excerpt'][:110]}")
     opened = [path or "(project root)" for path in payload["opened_directories"]]
     traversal = payload["traversal"]
     print(
         f"      opened: {', '.join(opened) or 'none'}  "
         f"(visited {traversal['directories_visited']}, "
+        f"read {traversal['files_read']}, "
         f"fallback {traversal['fallback_used']}, "
-        f"degraded {traversal['degraded']}, model {traversal['model']})"
+        f"degraded {traversal['degraded']}, "
+        f"scorer {traversal['scorer_version']})"
     )
 
 
@@ -130,7 +134,10 @@ def run(args: argparse.Namespace, report: Report, payloads: dict[str, Any]) -> i
     settings = get_settings()
     print(f"Graph AI Search — live check against project {args.project_id}")
     print(f"  api        : in-process ({settings.supabase_url or 'SUPABASE_URL missing'})")
-    print(f"  summariser : {settings.resolved_summarizer} ({settings.gemini_model})")
+    print(
+        f"  scorer     : local (no model calls), "
+        f"folder threshold {settings.scoring_folder_threshold}"
+    )
     print(f"  identity   : {'bearer token' if args.token else 'X-Dev-User-Id ' + args.user}")
     print(f"  limit      : {args.limit}")
 
@@ -161,7 +168,15 @@ def run(args: argparse.Namespace, report: Report, payloads: dict[str, Any]) -> i
             report.check(
                 "the response carries the documented fields",
                 set(payload)
-                == {"query", "project_id", "results", "opened_directories", "traversal"}
+                == {
+                    "query",
+                    "context",
+                    "project_id",
+                    "results",
+                    "directories",
+                    "opened_directories",
+                    "traversal",
+                }
                 and all(set(hit) == HIT_KEYS for hit in payload["results"]),
             )
             report.check("the query is echoed back", payload["query"] == query)
@@ -231,7 +246,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout",
         type=float,
         default=300.0,
-        help="seconds to wait for a response (model calls are slow)",
+        help="seconds to wait for a response (a cold cache reads documents)",
     )
     parser.add_argument("--json", action="store_true", help="also dump the payloads")
     return parser

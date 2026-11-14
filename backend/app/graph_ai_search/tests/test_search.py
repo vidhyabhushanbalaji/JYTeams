@@ -1,209 +1,240 @@
-"""The walk: exhaustive descent, the optional valve, the fallback and batching."""
+"""The walk: branch selection, body reads, the optional valve, the read budget and the sweep."""
 
 from __future__ import annotations
 
+from app.core.text import build_query
 from app.graph_ai_search.search import (
     DocumentBrief,
     FolderBrief,
     SearchOutcome,
     find_matching_files,
 )
-from app.graph_ai_search.tests.fakes import ScriptedSearcher
+from app.graph_ai_search.tests.fakes import ScriptedScorer
 
 
-def _folder(directory_id: str, path: str, *, description: str = "") -> FolderBrief:
+def _folder(directory_id: str, path: str, description: str = "") -> FolderBrief:
     return FolderBrief(
         directory_id=directory_id,
         path=path,
         name=path.rsplit("/", 1)[-1] if path else "",
         depth=path.count("/") + 1 if path else 0,
-        description=description or f"everything about {path or 'the project'}",
+        description=description,
     )
 
 
-def _document(file_id: str, directory_path: str, name: str, summary: str = "") -> DocumentBrief:
+def _document(file_id: str, directory_id: str, directory_path: str, name: str) -> DocumentBrief:
     return DocumentBrief(
         file_id=file_id,
         name=name,
         path=f"{directory_path}/{name}" if directory_path else name,
-        directory_id=f"dir-of-{directory_path or 'root'}",
+        directory_id=directory_id,
         directory_path=directory_path,
-        summary=summary or f"about {name}",
+        storage_bucket="test-bucket",
+        storage_path=f"{directory_id}/{name}",
+        content_sha256=f"sha-{name}",
     )
+
+
+class Reader:
+    """Records which documents the walk opened, and can fail on demand."""
+
+    def __init__(self, fail: set[str] | None = None) -> None:
+        self.reads: list[str] = []
+        self.fail = fail or set()
+
+    async def __call__(self, document: DocumentBrief) -> str:
+        self.reads.append(document.name)
+        if document.name in self.fail:
+            raise RuntimeError("bucket unavailable")
+        return f"the content of {document.name}"
 
 
 async def _walk(
-    root: FolderBrief,
-    folders: dict[str, list[FolderBrief]],
-    documents: dict[str, list[DocumentBrief]],
-    searcher: ScriptedSearcher,
     *,
-    query: str = "rollback a deployment",
+    root: FolderBrief,
+    children: dict[str, list[FolderBrief]],
+    documents: dict[str, list[DocumentBrief]],
+    scorer: ScriptedScorer,
+    reader: Reader | None = None,
     **kwargs: object,
-) -> SearchOutcome:
-    return await find_matching_files(
+) -> tuple[SearchOutcome, Reader]:
+    reader = reader or Reader()
+    outcome = await find_matching_files(
         root=root,
         documents_of=lambda directory_id: documents.get(directory_id, []),
-        children_of=lambda directory_id: folders.get(directory_id, []),
-        query=query,
-        searcher=searcher,
+        children_of=lambda directory_id: children.get(directory_id, []),
+        read_body=reader,
+        query=build_query("deploy a release"),
+        scorer=scorer,
         total_documents=sum(len(items) for items in documents.values()),
         **kwargs,  # type: ignore[arg-type]
     )
+    return outcome, reader
 
 
-async def test_walk_exhausts_every_matching_branch() -> None:
-    """Twelve matching folders in a chain: more than any former budget, all must open."""
-    depth = 12
-    chain = [_folder(f"d{index}", f"level{index}") for index in range(depth)]
+def _pulse() -> tuple[FolderBrief, dict[str, list[FolderBrief]], dict[str, list[DocumentBrief]]]:
+    """Root with two matching branches and one branch whose description misses."""
     root = _folder("root", "")
-    folders = {"root": [chain[0]]}
-    matches: dict[str, dict[str, list[str]]] = {"": {"folders": [chain[0].name]}}
-    for index in range(depth - 1):
-        folders[f"d{index}"] = [chain[index + 1]]
-        matches[chain[index].path] = {"folders": [chain[index + 1].name]}
-    matches[chain[-1].path] = {"files": ["deep.md"]}
-
-    documents = {chain[-1].directory_id: [_document("f-deep", chain[-1].path, "deep.md")]}
-    searcher = ScriptedSearcher(matches=matches)
-
-    outcome = await _walk(root, folders, documents, searcher)
-
-    assert outcome.budget_exhausted is False
-    assert len(outcome.opened) == depth + 1  # the root plus every level
-    assert [item.document.name for item in outcome.results] == ["deep.md"]
-
-
-async def test_all_matching_children_are_opened() -> None:
-    """Six matching siblings: there is no per-node branch limit."""
-    root = _folder("root", "")
-    children = [_folder(f"c{index}", f"topic{index}") for index in range(6)]
-    folders = {"root": children}
-    for child in children:
-        folders[child.directory_id] = []
+    docs = _folder("docs", "docs", "API reference and architecture.")
+    guides = _folder("guides", "guides", "Deployment and release procedures.")
+    legal = _folder("legal", "legal", "Licences and trademarks.")
+    children = {"root": [docs, guides, legal], "docs": [], "guides": [], "legal": []}
     documents = {
-        child.directory_id: [_document(f"f{child.directory_id}", child.path, "notes.md")]
-        for child in children
+        "root": [_document("f-readme", "root", "", "README.md")],
+        "docs": [_document("f-arch", "docs", "docs", "architecture.md")],
+        "guides": [_document("f-deploy", "guides", "guides", "deployment.md")],
+        "legal": [_document("f-licence", "legal", "legal", "licence.md")],
     }
-    searcher = ScriptedSearcher(
-        matches={
-            "": {"folders": [child.name for child in children]},
-            **{child.path: {"files": ["notes.md"]} for child in children},
-        }
+    return root, children, documents
+
+
+async def test_matching_branches_are_opened_and_their_documents_read() -> None:
+    root, children, documents = _pulse()
+    scorer = ScriptedScorer(
+        folders={"docs": 0.8, "guides": 0.9},
+        documents={"deployment.md": 0.9, "architecture.md": 0.5},
     )
 
-    outcome = await _walk(root, folders, documents, searcher)
+    outcome, reader = await _walk(root=root, children=children, documents=documents, scorer=scorer)
 
-    assert len(outcome.opened) == 7  # root + six children
-    assert len(outcome.results) == 6
-
-
-async def test_optional_valve_stops_the_walk() -> None:
-    """``max_directories`` is the only cap, and it is opt-in."""
-    depth = 5
-    chain = [_folder(f"d{index}", f"level{index}") for index in range(depth)]
-    root = _folder("root", "")
-    folders = {"root": [chain[0]]}
-    matches: dict[str, dict[str, list[str]]] = {"": {"folders": [chain[0].name]}}
-    for index in range(depth - 1):
-        folders[f"d{index}"] = [chain[index + 1]]
-        matches[chain[index].path] = {"folders": [chain[index + 1].name]}
-
-    outcome = await _walk(root, folders, {}, ScriptedSearcher(matches=matches), max_directories=2)
-
-    assert outcome.budget_exhausted is True
-    assert len(outcome.opened) == 2
-
-
-async def test_the_valve_also_disables_the_fallback() -> None:
-    """A bounded walk must not turn into an unbounded sweep."""
-    root = _folder("root", "")
-    docs = _folder("docs", "docs", description="General material.")
-    folders = {"root": [docs], "docs": []}
-    documents = {"docs": [_document("f1", "docs", "architecture.md")]}
-    searcher = ScriptedSearcher(
-        matches={"": {"folders": ["docs"]}, "docs": {"files": ["architecture.md"]}}
-    )
-
-    outcome = await _walk(root, folders, documents, searcher, max_directories=1)
-
-    assert outcome.budget_exhausted is True
+    assert outcome.opened == ["", "guides", "docs"]
+    # Only the opened branches are read; the pruned branch costs nothing.
+    assert sorted(reader.reads) == ["README.md", "architecture.md", "deployment.md"]
+    assert [item.document.name for item in outcome.results] == ["deployment.md", "architecture.md"]
+    assert outcome.files_read == 3
     assert outcome.fallback_used is False
-    assert outcome.opened == [""]
+    assert outcome.scorer_version == "scripted"
 
 
-async def test_small_project_fallback_sweeps_the_tree() -> None:
-    """A vague folder description must not hide its files on a small project."""
+async def test_a_branch_below_the_threshold_is_pruned_without_reading_it() -> None:
+    root, children, documents = _pulse()
+    scorer = ScriptedScorer(folders={"legal": 0.1}, documents={"licence.md": 0.9})
+
+    outcome, reader = await _walk(
+        root=root,
+        children=children,
+        documents=documents,
+        scorer=scorer,
+        fallback_limit=0,
+    )
+
+    assert "legal" not in outcome.opened
+    assert "licence.md" not in reader.reads
+    assert outcome.results == []
+
+
+async def test_scores_order_the_results() -> None:
     root = _folder("root", "")
-    docs = _folder("docs", "docs", description="General material.")
-    folders = {"root": [docs], "docs": []}
     documents = {
-        "root": [_document("f-readme", "", "README.md", "Project overview.")],
-        "docs": [_document("f-arch", "docs", "architecture.md", "Ingest pipeline design.")],
+        "root": [
+            _document("f1", "root", "", "alpha.md"),
+            _document("f2", "root", "", "beta.md"),
+            _document("f3", "root", "", "gamma.md"),
+        ]
     }
-    # Nothing matches at the root, so "docs" is never opened by the guided walk.
-    searcher = ScriptedSearcher(matches={"docs": {"files": ["architecture.md"]}})
+    scorer = ScriptedScorer(documents={"alpha.md": 0.4, "beta.md": 0.85, "gamma.md": 0.6})
 
-    outcome = await _walk(root, folders, documents, searcher)
+    outcome, _ = await _walk(root=root, children={"root": []}, documents=documents, scorer=scorer)
+
+    assert [item.document.name for item in outcome.results] == ["beta.md", "gamma.md", "alpha.md"]
+    assert [item.score for item in outcome.results] == [0.85, 0.6, 0.4]
+
+
+async def test_relevant_folders_are_reported_for_browsing() -> None:
+    root, children, documents = _pulse()
+    scorer = ScriptedScorer(
+        folders={"guides": 0.9, "docs": 0.6},
+        matched={"guides": ("deploy", "release")},
+    )
+
+    outcome, _ = await _walk(root=root, children=children, documents=documents, scorer=scorer)
+
+    assert [item.path for item in outcome.directories] == ["guides", "docs"]
+    assert outcome.directories[0].matched == ("deploy", "release")
+
+
+async def test_the_optional_valve_stops_the_walk() -> None:
+    root, children, documents = _pulse()
+    scorer = ScriptedScorer(folders={"docs": 0.8, "guides": 0.9})
+
+    outcome, _ = await _walk(
+        root=root, children=children, documents=documents, scorer=scorer, max_directories=1
+    )
+
+    assert outcome.budget_exhausted is True
+    assert outcome.opened == [""]
+    assert outcome.fallback_used is False
+
+
+async def test_the_read_budget_bounds_a_wide_folder() -> None:
+    root = _folder("root", "")
+    documents = {
+        "root": [_document(f"f{index}", "root", "", f"doc{index}.md") for index in range(10)]
+    }
+    scorer = ScriptedScorer(documents={f"doc{index}.md": 0.5 for index in range(10)})
+
+    outcome, reader = await _walk(
+        root=root, children={"root": []}, documents=documents, scorer=scorer, max_files_read=4
+    )
+
+    assert outcome.budget_exhausted is True
+    assert len(reader.reads) == 4
+    assert outcome.files_read == 4
+
+
+async def test_an_unreadable_document_degrades_without_losing_the_rest() -> None:
+    root = _folder("root", "")
+    documents = {
+        "root": [
+            _document("f1", "root", "", "broken.md"),
+            _document("f2", "root", "", "fine.md"),
+        ]
+    }
+    scorer = ScriptedScorer(documents={"broken.md": 0.9, "fine.md": 0.6})
+    reader = Reader(fail={"broken.md"})
+
+    outcome, _ = await _walk(
+        root=root, children={"root": []}, documents=documents, scorer=scorer, reader=reader
+    )
+
+    assert outcome.degraded is True
+    assert [item.document.name for item in outcome.results] == ["fine.md"]
+
+
+async def test_the_sweep_reads_a_branch_the_description_missed() -> None:
+    root, children, documents = _pulse()
+    # Nothing matches at the root, so "guides" is never opened by the guided walk.
+    scorer = ScriptedScorer(documents={"deployment.md": 0.8})
+
+    outcome, reader = await _walk(root=root, children=children, documents=documents, scorer=scorer)
 
     assert outcome.fallback_used is True
-    assert [item.document.name for item in outcome.results] == ["architecture.md"]
-    assert ("judge", "docs") in searcher.calls
+    assert [item.document.name for item in outcome.results] == ["deployment.md"]
+    assert "deployment.md" in reader.reads
 
 
-async def test_fallback_is_skipped_for_large_projects() -> None:
+async def test_the_sweep_is_skipped_for_large_projects() -> None:
     root = _folder("root", "")
-    documents = {"root": [_document(f"f{index}", "", f"note{index}.md") for index in range(41)]}
-    searcher = ScriptedSearcher()
+    documents = {
+        "root": [_document(f"f{index}", "root", "", f"note{index}.md") for index in range(41)]
+    }
+    scorer = ScriptedScorer()
 
-    outcome = await _walk(root, {"root": []}, documents, searcher)
+    outcome, _ = await _walk(root=root, children={"root": []}, documents=documents, scorer=scorer)
 
     assert outcome.fallback_used is False
     assert outcome.results == []
 
 
-async def test_ranking_batches_without_dropping_what_a_caller_can_ask_for() -> None:
-    """45 logged files -> two batch calls plus one consolidation of the winners.
-
-    The consolidation covers ``RANK_BATCH`` documents, which is at least the maximum
-    ``limit``, so trimming to ``limit`` never loses a document that was worth ranking.
-    """
+async def test_a_match_keeps_the_highest_score_seen_for_one_file() -> None:
     root = _folder("root", "")
-    documents = {
-        "root": [_document(f"f{index:02d}", "", f"doc{index:02d}.md") for index in range(45)]
-    }
-    matches = {"": {"files": [item.name for item in documents["root"]]}}
-    searcher = ScriptedSearcher(matches=matches)
+    document = _document("f1", "root", "", "notes.md")
+    scorer = ScriptedScorer(documents={"notes.md": 0.7})
 
-    outcome = await _walk(root, {"root": []}, documents, searcher)
-
-    rank_calls = [call for call in searcher.calls if call[0] == "rank"]
-    assert len(rank_calls) == 3  # 25 + 20, then the winners
-    assert [len(batch) for batch in searcher.ranked_batches] == [25, 20, 25]
-    assert outcome.results[0].document.name == "doc00.md"
-    assert len({item.document.file_id for item in outcome.results}) == 25
-
-
-async def test_a_failed_judgement_degrades_instead_of_failing() -> None:
-    root = _folder("root", "")
-    docs = _folder("docs", "docs")
-    documents = {"docs": [_document("f1", "docs", "anything.md")]}
-
-    outcome = await _walk(
-        root, {"root": [docs], "docs": []}, documents, ScriptedSearcher(fail_judging=True)
+    outcome, _ = await _walk(
+        root=root, children={"root": []}, documents={"root": [document]}, scorer=scorer
     )
 
-    assert outcome.degraded is True
-    assert outcome.results == []
-
-
-async def test_a_failed_ranking_falls_back_to_relevance() -> None:
-    root = _folder("root", "")
-    documents = {"root": [_document("f1", "", "notes.md")]}
-    searcher = ScriptedSearcher(matches={"": {"files": ["notes.md"]}}, fail_ranking=True)
-
-    outcome = await _walk(root, {"root": []}, documents, searcher)
-
-    assert outcome.degraded is True
-    assert [item.document.name for item in outcome.results] == ["notes.md"]
-    assert outcome.results[0].score > 0
+    assert len(outcome.results) == 1
+    assert outcome.results[0].document.file_id == "f1"
+    assert outcome.results[0].score == 0.7

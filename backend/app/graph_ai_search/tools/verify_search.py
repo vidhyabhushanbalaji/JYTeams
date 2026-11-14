@@ -10,8 +10,8 @@ Run from ``backend/``:
 
 The tree is the one already in the database — ``README.md``, ``CONTRIBUTING.md``,
 ``docs/{api-reference,architecture}.md`` and ``guides/{deployment,rollback-deployment}.md`` —
-seeded with the real stored summaries, so the walk sees exactly what the production index
-holds. The offline searcher replaces Gemini, so this runs with no key and no network.
+seeded with the stored document text, so the walk sees exactly what production holds. The local
+scorer replaces the model entirely, so this runs with no key, no network and no quota.
 
 Each query is asserted: the document the query is about must come back in the top two, and
 a query about something the project does not cover must return nothing.
@@ -29,9 +29,10 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from app.core.config import get_settings
-from app.graph_ai_search.llm import MockSearcher
+from app.graph_ai_search.scoring import LocalScorer
 from app.graph_ai_search.service import GraphSearchService
-from app.graph_ai_search.tests.fakes import InMemorySearchRepository
+from app.graph_ai_search.storage import BlobCache, DocumentTextReader
+from app.graph_ai_search.tests.fakes import FakeBlobStore, InMemorySearchRepository
 
 Row = dict[str, Any]
 
@@ -105,9 +106,9 @@ TREE = {
     ],
 }
 
-#: (query, the document that must be in the top two). The offline searcher matches keywords,
-#: so each query shares vocabulary with the stored descriptions — the live check uses natural
-#: phrasing instead, where Gemini does the judging.
+#: (query, the document that must be in the top two). The local scorer matches keywords, so each
+#: query shares vocabulary with the stored descriptions; the live check exercises the same tree
+#: against a running service.
 CASES = [
     ("how do I roll back a bad production release", "guides/rollback-deployment.md"),
     ("API reference authentication requirements and endpoint schemas", "docs/api-reference.md"),
@@ -152,12 +153,12 @@ def seed(repository: InMemorySearchRepository, owner_id: str) -> dict[str, Any]:
     project = repository.seed_project(owner_id=owner_id, name=TREE["name"])
     repository.directories[project["root_directory_id"]]["description"] = TREE["description"]
 
-    for name, summary in TREE["files"]:
+    for name, text in TREE["files"]:
         repository.seed_file(
             project["id"],
             directory_id=project["root_directory_id"],
             name=name,
-            summary=summary,
+            body=text,
         )
 
     for folder in TREE["directories"]:
@@ -167,8 +168,8 @@ def seed(repository: InMemorySearchRepository, owner_id: str) -> dict[str, Any]:
             name=folder["name"],
             description=folder["description"],
         )
-        for name, summary in folder["files"]:
-            repository.seed_file(project["id"], directory_id=row["id"], name=name, summary=summary)
+        for name, text in folder["files"]:
+            repository.seed_file(project["id"], directory_id=row["id"], name=name, body=text)
 
     return project
 
@@ -179,13 +180,15 @@ def print_hits(payload: dict[str, Any]) -> None:
     if not hits:
         print("      (no documents matched)")
     for rank, hit in enumerate(hits, start=1):
-        print(f"      {rank}. {hit['score']:.2f}  {hit['path']}")
-        print(f"         {hit['reason']}")
+        terms = ", ".join(hit["matched_terms"]) or "name only"
+        print(f"      {rank}. {hit['score']:.2f}  {hit['path']}  [{terms}]")
+        print(f"         {hit['excerpt'][:110]}")
     opened = [path or "(project root)" for path in payload["opened_directories"]]
     traversal = payload["traversal"]
     print(
         f"      opened: {', '.join(opened) or 'none'}  "
         f"(visited {traversal['directories_visited']}, "
+        f"read {traversal['files_read']}, "
         f"fallback {traversal['fallback_used']}, "
         f"degraded {traversal['degraded']})"
     )
@@ -195,9 +198,16 @@ async def run(args: argparse.Namespace, report: Report, payloads: dict[str, Any]
     settings = get_settings()
     repository = InMemorySearchRepository()
     project = seed(repository, settings.dev_user_id)
-    service = GraphSearchService(repository=repository, searcher=MockSearcher(), settings=settings)
+    service = GraphSearchService(
+        repository=repository,
+        reader=DocumentTextReader(
+            store=FakeBlobStore.from_repository(repository), cache=BlobCache(max_entries=16)
+        ),
+        scorer=LocalScorer(),
+        settings=settings,
+    )
 
-    print("Graph AI Search — example-tree check (offline, mock searcher)")
+    print("Graph AI Search — example-tree check (offline, local scorer, no model calls)")
     print(f"  project : {project['name']} ({len(repository.files)} documents)")
     print(
         "  tree    : README, CONTRIBUTING, docs/{api-reference,architecture}, "
@@ -219,7 +229,16 @@ async def run(args: argparse.Namespace, report: Report, payloads: dict[str, Any]
         )
         report.check(
             "the response carries the documented fields",
-            set(payload) == {"query", "project_id", "results", "opened_directories", "traversal"}
+            set(payload)
+            == {
+                "query",
+                "context",
+                "project_id",
+                "results",
+                "directories",
+                "opened_directories",
+                "traversal",
+            }
             and all(
                 set(hit)
                 == {
@@ -228,9 +247,9 @@ async def run(args: argparse.Namespace, report: Report, payloads: dict[str, Any]
                     "path",
                     "directory_id",
                     "directory_path",
-                    "summary",
                     "score",
-                    "reason",
+                    "matched_terms",
+                    "excerpt",
                 }
                 for hit in payload["results"]
             ),

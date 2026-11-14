@@ -24,7 +24,8 @@ class FileBrief(BaseModel):
     name: str
     size_bytes: int
     content_sha256: str
-    summary: str
+    #: First ~200 characters of the document — no model wrote it, so it is always faithful.
+    preview: str
 
 
 class Suggestion(BaseModel):
@@ -41,20 +42,20 @@ class Suggestion(BaseModel):
     child_directory_count: int
     is_leaf: bool
     reason: str
+    #: The document's own words that the folder matched, so the score is explainable.
+    matched_terms: list[str] = Field(default_factory=list)
     proposed_new_directory_names: list[str] = Field(default_factory=list)
     name_available: bool
     suggested_file_names: list[str] = Field(default_factory=list)
     identical_content_at: list[str] = Field(default_factory=list)
 
 
-class TraversalInfo(BaseModel):
-    """What the semantic walk cost, and whether it had to give up early."""
+class ScanInfo(BaseModel):
+    """What the local ranking cost (no model was called)."""
 
-    expanded: int
-    visited: int
-    degraded: bool
-    budget_exhausted: bool
-    model: str
+    folders_scored: int
+    threshold: float
+    scorer_version: str
 
 
 class SuggestionAccepted(BaseModel):
@@ -66,7 +67,7 @@ class SuggestionAccepted(BaseModel):
     expires_at: datetime | None = None
     file: FileBrief
     suggestions: list[Suggestion] = Field(default_factory=list)
-    traversal: TraversalInfo
+    scan: ScanInfo
 
 
 class PlacementIn(BaseModel):
@@ -87,7 +88,7 @@ class PlacedFileOut(BaseModel):
     path: str
     directory_id: str
     size_bytes: int
-    summary: str | None = None
+    #: Always `skipped`: documents are not summarised, the folder is described instead.
     summary_status: str
     storage_bucket: str | None = None
     storage_path: str | None = None
@@ -101,5 +102,6 @@ class PlacementOut(BaseModel):
     directory_id: str
     directory_path: str
     created_directory: bool
+    #: Folders whose description was refreshed (one model call covered all of them).
     refreshed_directories: int
     file: PlacedFileOut

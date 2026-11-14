@@ -2,28 +2,30 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from fastapi import HTTPException
 
 from app.core.config import get_settings
+from app.graph_creation.describe import MockDescriber
 from app.graph_creation.schemas import UploadMode
 from app.graph_creation.service import GraphCreationService
-from app.graph_creation.summarise import MockSummarizer
 from app.graph_creation.tests.fakes import (
     InMemoryGraphRepository,
     InMemoryObjectStore,
-    RecordingSummarizer,
+    RecordingDescriber,
 )
 from app.graph_creation.tree import FileEntry
 
 
-def _service(summarizer: MockSummarizer | None = None):
+def _service(describer: MockDescriber | None = None):
     repository = InMemoryGraphRepository()
     store = InMemoryObjectStore()
     service = GraphCreationService(
         repository=repository,
         store=store,
-        summarizer=summarizer or MockSummarizer(),
+        describer=describer or MockDescriber(),
         settings=get_settings(),
     )
     return service, repository, store
@@ -59,8 +61,8 @@ async def test_new_upload_builds_a_described_tree() -> None:
     assert directories[""]["description"]
     assert directories["docs/api"]["description"]
 
-    assert files["docs/api/auth.md"]["summary_status"] == "ok"
-    assert files["docs/api/auth.md"]["summary"]
+    assert files["docs/api/auth.md"]["summary_status"] == "skipped"
+    assert files["docs/api/auth.md"]["summary"] is None
     assert files["docs/api/auth.md"]["storage_path"].endswith(".md")
     assert store.objects
 
@@ -75,8 +77,8 @@ async def test_new_upload_builds_a_described_tree() -> None:
 
 
 async def test_descriptions_are_produced_bottom_up() -> None:
-    summarizer = RecordingSummarizer()
-    service, _, _ = _service(summarizer)
+    describer = RecordingDescriber()
+    service, _, _ = _service(describer)
     prepared = await service.prepare(
         owner_id="user-1",
         mode=UploadMode.NEW,
@@ -85,13 +87,38 @@ async def test_descriptions_are_produced_bottom_up() -> None:
 
     await service.run_job(prepared)
 
-    directory_calls = [path for kind, path in summarizer.calls if kind == "directory"]
+    directory_calls = [path for kind, path in describer.calls if kind == "directory"]
     assert directory_calls == ["docs/api", "docs", ""]
 
 
-async def test_unusable_files_are_kept_without_calling_the_model() -> None:
-    summarizer = RecordingSummarizer()
-    service, repository, _ = _service(summarizer)
+async def test_one_model_call_per_directory_and_the_file_text_reaches_it() -> None:
+    """The point of the change: three files, two folders, two calls."""
+    describer = RecordingDescriber()
+    service, repository, _ = _service(describer)
+    prepared = await service.prepare(
+        owner_id="user-1",
+        mode=UploadMode.NEW,
+        entries=[
+            FileEntry("docs/alpha.md", b"# Alpha\n\nDetails about alpha."),
+            FileEntry("docs/beta.md", b"# Beta\n\nDetails about beta."),
+            FileEntry("README.md", b"# Overview"),
+        ],
+    )
+
+    await service.run_job(prepared)
+
+    assert [path for kind, path in describer.calls if kind == "directory"] == ["docs", ""]
+    directories = {
+        row["path"]: row for row in await repository.list_directories(prepared.project["id"])
+    }
+    # The folder was described from the documents themselves, not from per-file summaries.
+    assert "Alpha" in directories["docs"]["description"]
+    assert "Beta" in directories["docs"]["description"]
+
+
+async def test_unusable_files_are_stored_and_the_folder_is_still_described() -> None:
+    describer = RecordingDescriber()
+    service, repository, _ = _service(describer)
     prepared = await service.prepare(
         owner_id="user-1",
         mode=UploadMode.NEW,
@@ -102,8 +129,9 @@ async def test_unusable_files_are_kept_without_calling_the_model() -> None:
 
     files = {row["path"]: row for row in await repository.list_files(prepared.project["id"])}
     assert files["diagram.png"]["summary_status"] == "skipped"
-    assert "unsupported file type" in files["diagram.png"]["summary"]
-    assert ("file", "diagram.png") not in summarizer.calls
+    assert files["diagram.png"]["summary"] is None
+    # One call for the folder, none for the individual documents.
+    assert [kind for kind, _ in describer.calls] == ["directory"]
 
 
 async def test_add_merges_into_the_existing_tree_and_refreshes_ancestors() -> None:
@@ -199,15 +227,15 @@ async def test_tree_reads_are_nested_and_depth_limited() -> None:
     assert directory["files"] == []
 
 
-class _BrokenSummarizer(MockSummarizer):
-    """Summariser whose Gemini calls all fail (as a retired model would)."""
+class _BrokenDescriber(MockDescriber):
+    """Describer whose Gemini calls all fail (as a retired model would)."""
 
-    async def summarise_file(self, *, name: str, text: str) -> str:
+    async def describe_directory(self, *, path: str, files: Any, directories: Any) -> str:
         raise RuntimeError("gemini exploded")
 
 
-async def test_failed_summaries_are_reported_on_the_job() -> None:
-    service, repository, _ = _service(_BrokenSummarizer())
+async def test_failed_descriptions_are_reported_on_the_job() -> None:
+    service, repository, _ = _service(_BrokenDescriber())
     prepared = await service.prepare(
         owner_id="user-1", mode=UploadMode.NEW, entries=[FileEntry("a.md", b"# A")]
     )
@@ -220,5 +248,6 @@ async def test_failed_summaries_are_reported_on_the_job() -> None:
     assert job["status"] == "partial"
     assert "item(s) failed" in job["error"]
     assert "gemini exploded" in job["error"]
-    assert files[0]["summary_status"] == "failed"
-    assert files[0]["summary"] == "Summary unavailable."
+    # The document is still stored; only the folder description failed.
+    assert files[0]["summary_status"] == "skipped"
+    assert files[0]["summary"] is None

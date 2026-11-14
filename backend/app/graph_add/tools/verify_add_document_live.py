@@ -57,7 +57,7 @@ RESPONSE_KEYS = {
     "expires_at",
     "file",
     "suggestions",
-    "traversal",
+    "scan",
 }
 SUGGESTION_KEYS = {
     "rank",
@@ -71,6 +71,7 @@ SUGGESTION_KEYS = {
     "child_directory_count",
     "is_leaf",
     "reason",
+    "matched_terms",
     "proposed_new_directory_names",
     "name_available",
     "suggested_file_names",
@@ -115,7 +116,7 @@ def find_directory(client: TestClient, project_id: str, wanted: str, *, depth: i
 def print_suggestions(payload: Row) -> None:
     brief = payload["file"]
     print(f"\n  document : {brief['name']} ({brief['size_bytes']} bytes)")
-    print(f"  summary  : {brief['summary']}")
+    print(f"  preview  : {brief['preview']}")
     print(f"\n  {'#':>2}  {'score':>5}  {'path':<28}  {'files/dirs':>10}  leaf  reason")
     for item in payload["suggestions"]:
         counts = f"{item['direct_file_count']}/{item['child_directory_count']}"
@@ -132,10 +133,10 @@ def print_suggestions(payload: Row) -> None:
             print(
                 f"        identical content already at: {', '.join(item['identical_content_at'])}"
             )
-    traversal = payload["traversal"]
+    scan = payload["scan"]
     print(
-        f"\n  walk: expanded={traversal['expanded']} visited={traversal['visited']} "
-        f"degraded={traversal['degraded']} model={traversal['model']}"
+        f"\n  scan: folders_scored={scan['folders_scored']} threshold={scan['threshold']} "
+        f"scorer={scan['scorer_version']} (no model call)"
     )
 
 
@@ -145,7 +146,7 @@ def run(args: argparse.Namespace, document: Path, report: Report, payloads: dict
     print(f"Graph Add — live check against project {args.project_id}")
     print(f"  api          : in-process ({settings.supabase_url or 'SUPABASE_URL missing'})")
     print(f"  storage      : bucket {settings.storage_bucket}")
-    print(f"  summariser   : {settings.resolved_summarizer} ({settings.gemini_model})")
+    print(f"  describer    : {settings.resolved_summarizer} ({settings.gemini_model})")
     print(f"  identity     : {'bearer token' if args.token else 'X-Dev-User-Id ' + args.user}")
     print(f"  document     : {document}")
 
@@ -205,9 +206,9 @@ def run(args: argparse.Namespace, document: Path, report: Report, payloads: dict
             [item["rank"] for item in payload["suggestions"]] == list(range(1, len(paths) + 1)),
         )
         report.check(
-            "the walk was not degraded",
-            payload["traversal"]["degraded"] is False,
-            payload["traversal"],
+            "the scan reports what it cost, without a model call",
+            payload["scan"]["folders_scored"] >= 1 and bool(payload["scan"]["scorer_version"]),
+            payload["scan"],
         )
         if args.expect:
             report.check(
