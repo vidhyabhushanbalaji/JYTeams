@@ -52,7 +52,11 @@ class Settings(BaseSettings):
     # Gemini. Reserved for the Graph AI Search section; used here only by the
     # "gemini" summariser.
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.6-flash"
+    # Positive values cap thinking (faster, cheaper summaries). 0, blank or negative omits
+    # the thinking config entirely - which the *-flash-lite models require, because they
+    # reject a budget of 0 with 400 INVALID_ARGUMENT.
+    gemini_thinking_budget: int | None = 0
 
     # Summarisation. "auto" uses Gemini when a key is present, otherwise a local mock.
     summarizer: Literal["auto", "gemini", "mock"] = "auto"

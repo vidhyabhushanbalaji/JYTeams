@@ -197,3 +197,28 @@ async def test_tree_reads_are_nested_and_depth_limited() -> None:
     directory = await service.get_directory(full["tree"]["directories"][0]["id"], "user-1")
     assert [child["path"] for child in directory["directories"]] == ["docs/api"]
     assert directory["files"] == []
+
+
+class _BrokenSummarizer(MockSummarizer):
+    """Summariser whose Gemini calls all fail (as a retired model would)."""
+
+    async def summarise_file(self, *, name: str, text: str) -> str:
+        raise RuntimeError("gemini exploded")
+
+
+async def test_failed_summaries_are_reported_on_the_job() -> None:
+    service, repository, _ = _service(_BrokenSummarizer())
+    prepared = await service.prepare(
+        owner_id="user-1", mode=UploadMode.NEW, entries=[FileEntry("a.md", b"# A")]
+    )
+
+    await service.run_job(prepared)
+
+    job = await repository.get_job(prepared.job["id"])
+    files = await repository.list_files(prepared.project["id"])
+
+    assert job["status"] == "partial"
+    assert "item(s) failed" in job["error"]
+    assert "gemini exploded" in job["error"]
+    assert files[0]["summary_status"] == "failed"
+    assert files[0]["summary"] == "Summary unavailable."

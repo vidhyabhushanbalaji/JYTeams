@@ -25,6 +25,9 @@ Then prepare Supabase:
 3. **Auth** — for real tokens set `AUTH_MODE=supabase`. `AUTH_MODE=dev` (the default)
    trusts the `X-Dev-User-Id` header, which is what you want while Supabase Auth is not
    wired into the frontend yet.
+   In dev mode that id must be a **real** Supabase user (Authentication -> Users -> Add user,
+   copy the UUID into `DEV_USER_ID`): `projects.owner_id` references `auth.users`, so a
+   made-up id fails with a foreign-key error (`23503`).
 
 With an empty `.env` the API still starts: `/health` works, `/health/supabase` reports
 `503`, and section endpoints answer `503` instead of crashing.
@@ -36,7 +39,7 @@ With an empty `.env` the API still starts: `/health` works, `/health/supabase` r
 ```
 
 > **If the port is taken** (`ERROR: [WinError 10013]` / `[WinError 10048]`), another
-> process already owns it - on this machine a different project's API sits on 8000.
+> process already owns it (another project's API has squatted on 8000 here before).
 >
 > Find the owner with `netstat -ano | Select-String ':8000'` (last column is the PID),
 > then either stop that process or pick another port:
@@ -99,13 +102,13 @@ curl.exe http://localhost:8000/api/graph-creation/jobs/<job_id>
 
 ```powershell
 # preview only: validate the folder and show the tree + bottom-up order, no network
-..\.venv\Scripts\python.exe -m app.graph_creation.tools.upload_directory ..\..\docs --dry-run
+..\.venv\Scripts\python.exe -m app.graph_creation.tools.upload_directory ..\test_docs --dry-run
 
 # real upload against a running API, then print what was stored
-..\.venv\Scripts\python.exe -m app.graph_creation.tools.upload_directory ..\..\docs --url http://127.0.0.1:8001 --name Docs
+..\.venv\Scripts\python.exe -m app.graph_creation.tools.upload_directory ..\test_docs --name Docs
 
 # extend an existing project
-..\.venv\Scripts\python.exe -m app.graph_creation.tools.upload_directory ..\..\docs --mode add --project-id <uuid>
+..\.venv\Scripts\python.exe -m app.graph_creation.tools.upload_directory ..\test_docs --mode add --project-id <uuid>
 ```
 
 Options: `--url`, `--mode new|add`, `--name`, `--project-id`, `--token` (Supabase
@@ -184,7 +187,7 @@ All settings and defaults live in `app/core/config.py`; env var names are in
 | `AUTH_MODE`, `DEV_USER_ID` | `dev` trusts `X-Dev-User-Id`; `supabase` verifies the bearer token |
 | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` | Service role bypasses RLS — server-side only |
 | `STORAGE_BUCKET` | Bucket for uploaded markdown (default `project-files`) |
-| `GEMINI_API_KEY`, `GEMINI_MODEL` | Summarisation (and later Graph AI Search) |
+| `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_THINKING_BUDGET` | Summarisation (and later Graph AI Search). `gemini-3.5-flash-lite` has the most free-tier quota; `gemini-3.5-flash` / `gemini-3.6-flash` answer 429 once it is spent. Use a positive budget (e.g. `512`) - the lite models reject `0` with 400 |
 | `SUMMARIZER`, `SUMMARY_MAX_INPUT_CHARS`, `SUMMARY_CONCURRENCY` | `auto` / `gemini` / `mock` |
 | `MAX_UPLOAD_FILES`, `MAX_UPLOAD_BYTES`, `MAX_FILE_BYTES`, `MAX_DIRECTORY_DEPTH` | Upload limits |
 
