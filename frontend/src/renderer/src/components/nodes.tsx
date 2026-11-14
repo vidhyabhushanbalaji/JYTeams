@@ -1,50 +1,37 @@
-/** The three card types the canvas draws. Nothing here fetches: every node is a pure
- *  function of the model the graph hook produced. */
+/** The three cards on the tree: the centre folder, its files, its subfolders.
+ *
+ * A folder is a two-step card: the first press selects it (the inspector describes it), the
+ * second opens it. The canvas decides which of the two a press means, so the card only has
+ * to report that it was activated.
+ */
 
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
-import { memo } from 'react'
+import { memo, type KeyboardEvent } from 'react'
 
-import type { GraphNodeModel } from '../lib/treeToGraph'
+import { humanBytes } from '../lib/format'
+import type { FocusNodeModel } from '../lib/focusGraph'
 
 export interface GraphNodeData extends Record<string, unknown> {
-  node: GraphNodeModel
-  selected: boolean
+  node: FocusNodeModel
   hit: boolean
-  visited: boolean
+  dimmed: boolean
   busy: boolean
-  onToggle: (refId: string) => void
+  selected: boolean
+  onActivate: (refId: string) => void
 }
 
 export type GraphFlowNode = Node<GraphNodeData>
 
-function classes(data: GraphNodeData, kind: string, extra: string[] = []): string {
+function cardClass(data: GraphNodeData, kind: string): string {
   return [
     'node',
     `node--${kind}`,
     data.selected ? 'node--selected' : '',
     data.hit ? 'node--hit' : '',
-    data.visited ? 'node--visited' : '',
-    ...extra
+    data.dimmed ? 'node--dim' : ''
   ]
     .filter(Boolean)
     .join(' ')
-}
-
-function Chevron({ node, busy, onToggle }: { node: GraphNodeModel; busy: boolean; onToggle: (refId: string) => void }) {
-  return (
-    <button
-      type="button"
-      className="node__chevron"
-      aria-label={node.expanded ? `Collapse ${node.label}` : `Expand ${node.label}`}
-      aria-expanded={node.expanded}
-      onClick={(event) => {
-        event.stopPropagation()
-        onToggle(node.refId)
-      }}
-    >
-      {busy ? <span className="spinner" /> : node.expanded ? '\u25be' : '\u25b8'}
-    </button>
-  )
 }
 
 function FolderGlyph() {
@@ -68,41 +55,64 @@ function PageGlyph() {
   )
 }
 
-export const FolderNode = memo(function FolderNode({ data }: NodeProps<GraphFlowNode>) {
-  const { node, busy, onToggle } = data
-  return (
-    <div className={classes(data, 'folder')}>
-      <Handle type="target" position={Position.Left} className="node__handle" isConnectable={false} />
-      <div className="node__head">
-        <Chevron node={node} busy={busy} onToggle={onToggle} />
-        <span className="node__name">{node.label}</span>
-        {node.fileCount > 0 ? <span className="node__count">{node.fileCount}</span> : null}
-      </div>
-      <p className={node.description ? 'node__desc' : 'node__desc node__desc--empty'}>
-        {node.description ?? 'No description yet'}
-      </p>
-      <div className="node__footer">
-        <span>{node.fileCount} files</span>
-        <span className="node__sep" />
-        <span>{node.directoryCount} folders</span>
-        {node.hiddenDirectories > 0 ? <span className="node__chip">+{node.hiddenDirectories}</span> : null}
-      </div>
-      <Handle type="source" position={Position.Right} className="node__handle" isConnectable={false} />
-    </div>
-  )
-})
+function keyboardActivate(value: GraphNodeData): (event: KeyboardEvent<HTMLDivElement>) => void {
+  return (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      value.onActivate(value.node.refId)
+    }
+  }
+}
 
-export const RootNode = memo(function RootNode({ data }: NodeProps<GraphFlowNode>) {
+export const CentreNode = memo(function CentreNode({ data }: NodeProps<GraphFlowNode>) {
   const { node } = data
   return (
-    <div className={classes(data, 'root')}>
+    <div
+      className={cardClass(data, 'centre')}
+      role="button"
+      tabIndex={0}
+      aria-label={`${node.label}, current folder`}
+      onKeyDown={keyboardActivate(data)}
+    >
       <Handle type="target" position={Position.Left} className="node__handle" isConnectable={false} />
       <div className="node__head">
         <FolderGlyph />
         <span className="node__name">{node.label}</span>
       </div>
       <p className={node.description ? 'node__desc' : 'node__desc node__desc--empty'}>
-        {node.description ?? 'This project has no description yet'}
+        {node.description ?? 'This folder has no description yet'}
+      </p>
+      <div className="node__footer">
+        <span>{node.fileCount} files</span>
+        <span className="node__sep" />
+        <span>{node.directoryCount} folders</span>
+        <span className="node__chip">centre</span>
+      </div>
+      <Handle type="source" position={Position.Right} className="node__handle" isConnectable={false} />
+    </div>
+  )
+})
+
+export const FolderNode = memo(function FolderNode({ data }: NodeProps<GraphFlowNode>) {
+  const { node, busy, selected } = data
+  return (
+    <div
+      className={cardClass(data, 'folder')}
+      role="button"
+      tabIndex={0}
+      aria-label={selected ? `Open ${node.label}` : `Select ${node.label}`}
+      onKeyDown={keyboardActivate(data)}
+    >
+      <Handle type="target" position={Position.Left} className="node__handle" isConnectable={false} />
+      <div className="node__head">
+        <FolderGlyph />
+        <span className="node__name">{node.label}</span>
+        <span className={`node__open${selected ? ' node__open--ready' : ''}`} aria-hidden="true">
+          {busy ? <span className="spinner" /> : selected ? 'Open' : '\u203a'}
+        </span>
+      </div>
+      <p className={node.description ? 'node__desc' : 'node__desc node__desc--empty'}>
+        {node.description ?? 'No description yet'}
       </p>
       <div className="node__footer">
         <span>{node.fileCount} files</span>
@@ -117,7 +127,13 @@ export const RootNode = memo(function RootNode({ data }: NodeProps<GraphFlowNode
 export const FileNode = memo(function FileNode({ data }: NodeProps<GraphFlowNode>) {
   const { node } = data
   return (
-    <div className={classes(data, 'file')}>
+    <div
+      className={cardClass(data, 'file')}
+      role="button"
+      tabIndex={0}
+      aria-label={`Select ${node.label}`}
+      onKeyDown={keyboardActivate(data)}
+    >
       <Handle type="target" position={Position.Left} className="node__handle" isConnectable={false} />
       <div className="node__head">
         <PageGlyph />
@@ -127,7 +143,7 @@ export const FileNode = memo(function FileNode({ data }: NodeProps<GraphFlowNode
         {node.description ?? 'No summary yet'}
       </p>
       <div className="node__footer">
-        <span>{node.sizeBytes ? `${Math.max(1, Math.round(node.sizeBytes / 1024))} KB` : 'file'}</span>
+        <span>{humanBytes(node.sizeBytes ?? 0)}</span>
         {node.status && node.status !== 'ok' ? (
           <span className={`node__status node__status--${node.status}`}>{node.status}</span>
         ) : null}

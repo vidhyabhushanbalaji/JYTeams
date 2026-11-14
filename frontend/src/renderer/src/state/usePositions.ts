@@ -1,18 +1,39 @@
-/** Where each card sits, per project, in the main process (see src/main/layout.ts). */
+/**
+ * Where each card sits, remembered per view.
+ *
+ * Keys are `viewId::nodeId`, so drilling into a folder and coming back restores that view
+ * exactly as you left it - drags included. One flat map keeps the file written by the main
+ * process (userData/layouts) exactly as it was.
+ */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { XYPosition } from '@shared/types'
 
+const SEPARATOR = '::'
+
+export function positionsFor(
+  stored: Record<string, XYPosition>,
+  viewKey: string
+): Record<string, XYPosition> {
+  const prefix = `${viewKey}${SEPARATOR}`
+  const view: Record<string, XYPosition> = {}
+  for (const [key, value] of Object.entries(stored)) {
+    if (key.startsWith(prefix)) view[key.slice(prefix.length)] = value
+  }
+  return view
+}
+
 export function usePositions(projectId: string) {
-  const [positions, setPositions] = useState<Record<string, XYPosition>>({})
-  const [nonce, setNonce] = useState(0)
+  const [stored, setStored] = useState<Record<string, XYPosition>>({})
+  const storedRef = useRef(stored)
+  storedRef.current = stored
 
   useEffect(() => {
     let cancelled = false
-    setPositions({})
-    void window.jyteams.layout.load(projectId).then((stored) => {
-      if (!cancelled) setPositions(stored)
+    setStored({})
+    void window.jyteams.layout.load(projectId).then((loaded) => {
+      if (!cancelled) setStored(loaded)
     })
     return () => {
       cancelled = true
@@ -20,9 +41,9 @@ export function usePositions(projectId: string) {
   }, [projectId])
 
   const move = useCallback(
-    (nodeId: string, position: XYPosition) => {
-      setPositions((current) => {
-        const next = { ...current, [nodeId]: position }
+    (viewKey: string, nodeId: string, position: XYPosition) => {
+      setStored((current) => {
+        const next = { ...current, [`${viewKey}${SEPARATOR}${nodeId}`]: position }
         void window.jyteams.layout.save(projectId, next)
         return next
       })
@@ -30,11 +51,18 @@ export function usePositions(projectId: string) {
     [projectId]
   )
 
-  const reset = useCallback(async () => {
-    await window.jyteams.layout.clear(projectId)
-    setPositions({})
-    setNonce((value) => value + 1)
-  }, [projectId])
+  const clearView = useCallback(
+    async (viewKey: string) => {
+      const prefix = `${viewKey}${SEPARATOR}`
+      const next: Record<string, XYPosition> = {}
+      for (const [key, value] of Object.entries(storedRef.current)) {
+        if (!key.startsWith(prefix)) next[key] = value
+      }
+      await window.jyteams.layout.save(projectId, next)
+      setStored(next)
+    },
+    [projectId]
+  )
 
-  return { positions, move, reset, nonce }
+  return { stored, move, clearView }
 }

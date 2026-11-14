@@ -3,8 +3,8 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import type { PlacementResult, SearchHit } from '@shared/types'
 
 import { describeError } from '../lib/errors'
-import { directoryNodeId, fileNodeId } from '../lib/treeToGraph'
-import { useProjectGraph } from '../state/useProjectGraph'
+import { fileNodeId } from '../lib/focusGraph'
+import { useFocusGraph } from '../state/useFocusGraph'
 import { useSearch } from '../state/useSearch'
 import { AddDocumentFlow } from './AddDocumentFlow'
 import { GraphCanvas } from './GraphCanvas'
@@ -14,25 +14,24 @@ import { Spinner } from './primitives'
 
 export function ProjectScreen({
   projectId,
-  onBack,
   onOpenSettings,
   notify
 }: {
   projectId: string
-  onBack: () => void
   onOpenSettings: () => void
   notify: (message: string, tone?: 'info' | 'error') => void
 }) {
-  const graph = useProjectGraph(projectId)
+  const graph = useFocusGraph(projectId)
   const search = useSearch(projectId)
   const [side, setSide] = useState<'inspector' | 'search'>('inspector')
   const [query, setQuery] = useState('')
   const [adding, setAdding] = useState(false)
 
-  const model = graph.model
+  const view = graph.view
+
   const selected = useMemo(
-    () => model?.nodes.find((node) => node.id === graph.selectedId) ?? null,
-    [model, graph.selectedId]
+    () => view?.nodes.find((node) => node.id === graph.selectedId) ?? null,
+    [view, graph.selectedId]
   )
 
   const hits = useMemo(() => {
@@ -40,21 +39,6 @@ export function ProjectScreen({
     for (const hit of search.results?.results ?? []) found.add(fileNodeId(hit.file_id))
     return found
   }, [search.results])
-
-  const byPath = useMemo(() => {
-    const map = new Map<string, string>()
-    for (const directory of graph.directoryIndex.values()) map.set(directory.path, directory.id)
-    return map
-  }, [graph.directoryIndex])
-
-  const visited = useMemo(() => {
-    const opened = new Set<string>()
-    for (const path of search.results?.opened_directories ?? []) {
-      const id = byPath.get(path)
-      if (id) opened.add(directoryNodeId(id))
-    }
-    return opened
-  }, [search.results, byPath])
 
   useEffect(() => {
     if (!graph.actionError) return
@@ -68,32 +52,62 @@ export function ProjectScreen({
     void search.run(query)
   }
 
+  const openFolder = (refId: string): void => {
+    graph.select(null)
+    void graph.enter(refId)
+  }
+
   const openHit = async (hit: SearchHit): Promise<void> => {
-    await graph.revealDirectory(hit.directory_path)
+    await graph.revealPath(hit.directory_path)
     graph.focusNode(fileNodeId(hit.file_id))
   }
 
   const placed = async (result: PlacementResult): Promise<void> => {
     notify(`Added ${result.file.name} to ${result.directory_path || 'the project root'}.`)
-    await graph.refresh(result.directory_path)
+    await graph.revealPath(result.directory_path)
+    await graph.refreshCurrent()
     graph.focusNode(fileNodeId(result.file.id))
   }
 
-  const empty = model !== null && model.nodes.length <= 1
+  const isEmpty = view !== null && view.nodes.length <= 1
 
   return (
     <>
       <header className="topbar">
-        <button type="button" className="btn btn--ghost btn--sm" onClick={onBack}>
-          {'\u2190'} Projects
+        <button
+          type="button"
+          className="topbar__back btn btn--ghost btn--sm"
+          onClick={graph.back}
+          disabled={graph.stack.length <= 1}
+          title={graph.stack.length <= 1 ? 'You are at the project root' : 'Back to the previous folder'}
+        >
+          {'\u2190'} Back
         </button>
 
-        <div className="topbar__titles">
-          <span className="topbar__title">{graph.project?.name ?? 'Opening project'}</span>
-          <span className="topbar__crumb">
-            {selected ? selected.path || '(project root)' : `${model?.nodes.length ?? 0} cards drawn`}
-          </span>
-        </div>
+        <nav className="crumbs" aria-label="Folder path">
+          {graph.stack.map((crumb, index) => {
+            const isLast = index === graph.stack.length - 1
+            return (
+              <span key={crumb.id} className="crumbs__item">
+                {index > 0 ? (
+                  <span className="crumb__sep" aria-hidden="true">
+                    /
+                  </span>
+                ) : null}
+                <button
+                  type="button"
+                  className={`crumb${isLast ? ' crumb--current' : ''}`}
+                  onClick={() => graph.jumpTo(index)}
+                  disabled={isLast}
+                  aria-current={isLast ? 'page' : undefined}
+                  title={crumb.path || 'Project root'}
+                >
+                  {crumb.name}
+                </button>
+              </span>
+            )
+          })}
+        </nav>
 
         <div className="topbar__grow" />
 
@@ -125,7 +139,7 @@ export function ProjectScreen({
           {graph.status === 'loading' ? (
             <div className="canvas__state">
               <Spinner label="Opening the project" />
-              <p className="canvas__state-text">Reading the tree and its descriptions.</p>
+              <p className="canvas__state-text">Reading the top of the tree.</p>
             </div>
           ) : null}
 
@@ -146,10 +160,10 @@ export function ProjectScreen({
             </div>
           ) : null}
 
-          {graph.status === 'ready' && model ? (
-            empty ? (
+          {graph.status === 'ready' && view ? (
+            isEmpty ? (
               <div className="canvas__state">
-                <p className="canvas__state-title">Nothing in this tree yet</p>
+                <p className="canvas__state-title">This folder is empty</p>
                 <p className="canvas__state-text">
                   Add a document and it will be placed in the folder you choose.
                 </p>
@@ -161,21 +175,22 @@ export function ProjectScreen({
               <>
                 <div className="canvas">
                   <GraphCanvas
-                    model={model}
+                    model={view}
                     placements={graph.placements}
+                    graphKey={graph.graphKey}
+                    viewKey={graph.viewKey}
                     selectedId={graph.selectedId}
                     focus={graph.focus}
                     busyId={graph.busyId}
                     hits={hits}
-                    visited={visited}
                     dimmed={search.results !== null && search.results.results.length > 0}
                     onSelect={graph.select}
-                    onToggle={(refId) => void graph.toggle(refId)}
+                    onOpen={openFolder}
                     onMove={graph.move}
                   />
                 </div>
                 <p className="canvas__hint">
-                  Drag a card to move it · scroll to zoom · chevron to expand a folder
+                  Click a card to read it · click a folder again to open it · drag to rearrange
                 </p>
               </>
             )
@@ -208,7 +223,7 @@ export function ProjectScreen({
               onOpenHit={(hit) => void openHit(hit)}
             />
           ) : (
-            <Inspector node={selected} />
+            <Inspector node={selected ?? view?.centre ?? null} />
           )}
         </aside>
       </div>

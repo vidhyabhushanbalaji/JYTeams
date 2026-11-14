@@ -1,7 +1,10 @@
 /**
- * The canvas. Positions come from the graph hook (layout merged under the user\'s drags);
- * React Flow\'s own position changes are held locally only while a drag is in flight, so a
- * node never springs back before it is persisted.
+ * The tree canvas.
+ *
+ * Nodes live in React Flow state and are rebuilt only when the view or its flags change, so
+ * a drag mutates one node object and nothing else. Selection is handled by us (not React
+ * Flow) and touches only the two cards whose flag changed, which keeps it out of the drag
+ * path entirely.
  */
 
 import {
@@ -11,32 +14,38 @@ import {
   MiniMap,
   ReactFlow,
   ReactFlowProvider,
+  applyNodeChanges,
+  useNodesState,
   useReactFlow,
   type Edge,
   type NodeChange
 } from '@xyflow/react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 
 import type { XYPosition } from '@shared/types'
 
-import type { Positions } from '../lib/layout'
-import type { GraphModel } from '../lib/treeToGraph'
-import type { FocusRequest } from '../state/useProjectGraph'
-import { FileNode, FolderNode, RootNode, type GraphFlowNode, type GraphNodeData } from './nodes'
+import type { FocusViewModel } from '../lib/focusGraph'
+import type { FocusRequest } from '../state/useFocusGraph'
+import { TreeEdge } from './TreeEdge'
+import { CentreNode, FileNode, FolderNode, type GraphFlowNode, type GraphNodeData } from './nodes'
 
-const nodeTypes = { root: RootNode, folder: FolderNode, file: FileNode }
+const nodeTypes = { centre: CentreNode, folder: FolderNode, file: FileNode }
+const edgeTypes = { branch: TreeEdge }
 
 export interface GraphCanvasProps {
-  model: GraphModel
-  placements: Positions
+  model: FocusViewModel
+  placements: Record<string, XYPosition>
+  /** Changes when the view or its flags change - never during a drag. */
+  graphKey: string
+  /** Changes only when you move to another folder. */
+  viewKey: string
   selectedId: string | null
   focus: FocusRequest | null
   busyId: string | null
   hits: ReadonlySet<string>
-  visited: ReadonlySet<string>
   dimmed: boolean
   onSelect: (nodeId: string | null) => void
-  onToggle: (refId: string) => void
+  onOpen: (refId: string) => void
   onMove: (nodeId: string, position: XYPosition) => void
 }
 
@@ -51,95 +60,152 @@ export function GraphCanvas(props: GraphCanvasProps) {
 function Canvas({
   model,
   placements,
+  graphKey,
+  viewKey,
   selectedId,
   focus,
   busyId,
   hits,
-  visited,
   dimmed,
   onSelect,
-  onToggle,
+  onOpen,
   onMove
 }: GraphCanvasProps) {
   const { fitView } = useReactFlow()
-  const [dragging, setDragging] = useState<Record<string, XYPosition>>({})
+  const [nodes, setNodes] = useNodesState<GraphFlowNode>([])
+
+  // Pressing a card is one gesture with two meanings: select, then open. Reading the live
+  // props through a ref keeps the callback stable, so cards never hold a stale closure.
+  const live = useRef({ model, selectedId, onOpen, onSelect })
+  live.current = { model, selectedId, onOpen, onSelect }
+
+  const activate = useCallback((refId: string) => {
+    const current = live.current
+    const node = current.model.nodes.find((entry) => entry.refId === refId)
+    if (!node) return
+    if (node.navigable && current.selectedId === node.id) {
+      current.onOpen(node.refId)
+      return
+    }
+    current.onSelect(node.id)
+  }, [])
+
+  const builtFor = useRef('')
+  const fittedFor = useRef('')
   const focusHandled = useRef(0)
 
-  const nodes = useMemo<GraphFlowNode[]>(() => {
-    return model.nodes.map((node) => {
-      const selected = selectedId === node.id
-      const hit = hits.has(node.id)
-      const data: GraphNodeData = {
-        node,
-        selected,
-        hit,
-        visited: visited.has(node.id),
-        busy: busyId === node.refId,
-        onToggle
-      }
-      return {
+  const hitKey = useMemo(() => [...hits].sort().join(','), [hits])
+  const rebuildKey = `${graphKey}|${hitKey}|${dimmed ? 1 : 0}|${busyId ? busyId : '-'}`
+
+  useEffect(() => {
+    if (builtFor.current === rebuildKey) return
+    builtFor.current = rebuildKey
+    setNodes(
+      model.nodes.map((node) => ({
         id: node.id,
         type: node.kind,
-        position: dragging[node.id] ?? placements[node.id] ?? { x: 0, y: 0 },
-        data,
+        position: placements[node.id] ?? { x: 0, y: 0 },
+        data: {
+          node,
+          hit: hits.has(node.id),
+          dimmed: dimmed && !hits.has(node.id),
+          busy: busyId === node.refId,
+          selected: selectedId === node.id,
+          onActivate: activate
+        },
         draggable: true,
-        selectable: false,
-        className: dimmed && !hit ? 'node-dimmed' : undefined
-      }
-    })
-  }, [model, placements, dragging, selectedId, hits, visited, busyId, onToggle, dimmed])
+        selectable: false
+      }))
+    )
+  }, [rebuildKey, model, placements, hits, dimmed, busyId, selectedId, activate, setNodes])
 
-  const edges = useMemo<Edge[]>(() => model.edges.map((edge) => ({ ...edge, type: 'smoothstep' })), [model])
+  // Selecting a card replaces at most two node objects; the array is never rebuilt.
+  useEffect(() => {
+    setNodes((current) =>
+      current.map((node) => {
+        const selected = node.id === selectedId
+        if (Boolean(node.data.selected) === selected) return node
+        return { ...node, data: { ...node.data, selected } }
+      })
+    )
+  }, [selectedId, setNodes])
 
-  const handleNodesChange = useCallback((changes: NodeChange<GraphFlowNode>[]) => {
-    const moved: Record<string, XYPosition> = {}
-    for (const change of changes) {
-      if (change.type === 'position' && change.position) moved[change.id] = change.position
-    }
-    if (Object.keys(moved).length > 0) setDragging((current) => ({ ...current, ...moved }))
+  const edges = useMemo<Edge[]>(() => model.edges.map((edge) => ({ ...edge, type: 'branch' })), [model])
+
+  const handleNodesChange = useCallback(
+    (changes: NodeChange<GraphFlowNode>[]) => setNodes((current) => applyNodeChanges(changes, current)),
+    [setNodes]
+  )
+
+  // A plain click also ends a zero-distance drag; only a real move is worth persisting.
+  const dragOrigin = useRef<{ id: string; x: number; y: number } | null>(null)
+
+  const handleDragStart = useCallback((_event: unknown, node: GraphFlowNode) => {
+    dragOrigin.current = { id: node.id, x: node.position.x, y: node.position.y }
   }, [])
 
   const handleDragStop = useCallback(
     (_event: unknown, node: GraphFlowNode) => {
+      const origin = dragOrigin.current
+      dragOrigin.current = null
+      if (
+        origin &&
+        origin.id === node.id &&
+        Math.abs(node.position.x - origin.x) < 1 &&
+        Math.abs(node.position.y - origin.y) < 1
+      ) {
+        return
+      }
       onMove(node.id, node.position)
-      setDragging((current) => {
-        const next = { ...current }
-        delete next[node.id]
-        return next
-      })
     },
     [onMove]
   )
 
+  // Re-centre when you move to another folder (but never mid-drag).
+  useEffect(() => {
+    if (fittedFor.current === viewKey) return
+    fittedFor.current = viewKey
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const timer = window.setTimeout(() => {
+      void fitView({ duration: reduced ? 0 : 280, padding: 0.18 })
+    }, 60)
+    return () => window.clearTimeout(timer)
+  }, [viewKey, fitView])
+
+  // An explicit request - a search hit or a freshly placed document.
   useEffect(() => {
     if (!focus || focusHandled.current === focus.nonce) return
-    if (!model.nodes.some((node) => node.id === focus.nodeId)) return
+    if (!nodes.some((node) => node.id === focus.nodeId)) return
     focusHandled.current = focus.nonce
     void fitView({ nodes: [{ id: focus.nodeId }], duration: 320, padding: 2, maxZoom: 1 })
-  }, [focus, model, fitView])
+  }, [focus, nodes, fitView])
 
   return (
     <ReactFlow
       nodes={nodes}
       edges={edges}
       nodeTypes={nodeTypes}
+      edgeTypes={edgeTypes}
       onNodesChange={handleNodesChange}
-      onNodeClick={(_event, node) => onSelect(node.id)}
+      onNodeClick={(_event, node) => activate(node.data.node.refId)}
+      onNodeDragStart={handleDragStart}
       onNodeDragStop={handleDragStop}
       onPaneClick={() => onSelect(null)}
       nodesConnectable={false}
       elementsSelectable={false}
-      minZoom={0.15}
-      maxZoom={1.75}
+      minZoom={0.12}
+      maxZoom={1.8}
       fitView
-      fitViewOptions={{ padding: 0.22 }}
-      defaultEdgeOptions={{ type: 'smoothstep', style: { stroke: 'var(--line-strong)', strokeWidth: 1 } }}
+      fitViewOptions={{ padding: 0.18 }}
+      defaultEdgeOptions={{ type: 'branch' }}
     >
       <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="#e3e3df" />
       <MiniMap
         pannable
         zoomable
-        nodeColor={(node) => (node.id.startsWith('file:') ? '#f1f1ef' : '#d3d3ce')}
+        nodeColor={(node) =>
+          (node.data as GraphNodeData | undefined)?.node?.kind === 'centre' ? '#191919' : '#d3d3ce'
+        }
         maskColor="rgba(255, 255, 255, 0.72)"
       />
       <Controls showInteractive={false} />
