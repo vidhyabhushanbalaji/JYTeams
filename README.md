@@ -35,11 +35,11 @@ Copy-Item backend\.env.example backend\.env   # then fill in Supabase / Gemini
 
 # 4. run
 cd backend
-..\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+..\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000   # port taken? use --port 8001
 ```
 
 - API docs: <http://localhost:8000/docs>
-- Health: <http://localhost:8000/health>, `/health/neo4j`, `/health/supabase`
+- Health: <http://localhost:8000/health>, `/health/supabase`
 
 More detail, including tests and credentials setup: [`backend/README.md`](backend/README.md).
 

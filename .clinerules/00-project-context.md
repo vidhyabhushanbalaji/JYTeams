@@ -54,7 +54,7 @@ All backend commands run from `backend/`, using the repo-root virtualenv:
 ```powershell
 # from backend/
 ..\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt   # first time only
-..\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+..\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000   # port taken? use --port 8001
 ..\.venv\Scripts\python.exe -m pytest
 ..\.venv\Scripts\python.exe -m ruff check .
 ..\.venv\Scripts\python.exe -m ruff format .
