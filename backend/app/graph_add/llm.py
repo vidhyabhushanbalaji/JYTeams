@@ -36,6 +36,10 @@ _STOPWORD_TEXT = (
 _STOPWORDS = frozenset(_STOPWORD_TEXT.split())
 _MOCK_THRESHOLD = 0.10
 _MOCK_NAME_BONUS = 0.3
+#: How much of a child's summary the mock quotes back when describing a folder. Long
+#: enough that a refreshed description keeps its topic words (a real model rewrites prose
+#: instead, so this only affects the offline fallback).
+_EXCERPT = 240
 
 
 def _tokens(text: str) -> set[str]:
@@ -282,10 +286,12 @@ class MockNavigator:
         label = path or "the project root"
         parts = [f"{label} holds {len(files)} file(s) and {len(directories)} subfolder(s)."]
         if files:
-            entries = "; ".join(f"{name} ({summary[:60]})" for name, summary in files[:5])
+            entries = "; ".join(f"{name} ({summary[:_EXCERPT]})" for name, summary in files[:5])
             parts.append(f"Files: {entries}.")
         if directories:
-            entries = "; ".join(f"{name} ({summary[:60]})" for name, summary in directories[:5])
+            entries = "; ".join(
+                f"{name} ({summary[:_EXCERPT]})" for name, summary in directories[:5]
+            )
             parts.append(f"Subfolders: {entries}.")
         return " ".join(parts)
 

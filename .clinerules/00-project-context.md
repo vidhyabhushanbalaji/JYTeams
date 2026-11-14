@@ -11,7 +11,7 @@ An Electron desktop app that makes Microsoft Teams project information easier to
 | Backend | Python 3.14 + FastAPI — `backend/` |
 | Auth | Supabase Auth (bearer token); `AUTH_MODE=dev` trusts `X-Dev-User-Id` locally |
 | Data | Supabase **Postgres** (the tree, via `ltree`) + Supabase **Storage** (markdown files) |
-| LLM | Gemini via `google-genai` — file and directory summaries |
+| LLM | Gemini via `google-genai` — file and directory summaries, and the navigation that places a new document |
 | Graph DB | **None.** Neo4j was retired; re-add it only if Graph AI Search needs traversal |
 
 ## Layout
@@ -23,8 +23,8 @@ backend/
 │  ├─ core/                # config (pydantic-settings), logging, auth dependency
 │  ├─ db/                  # Supabase client factories + health ping
 │  ├─ health/              # /health, /health/supabase
-│  ├─ graph_creation/      # SECTION — designed and implemented (see its README section)
-│  ├─ graph_add/           # SECTION — scaffold only (empty router)
+│  ├─ graph_creation/      # SECTION — implemented (upload a directory → described tree)
+│  ├─ graph_add/           # SECTION — implemented (place one document in that tree)
 │  └─ graph_ai_search/     # SECTION — scaffold only (empty router)
 ├─ tests/                  # cross-cutting tests (health, config, wiring)
 ├─ requirements.txt        # runtime deps (pinned)
@@ -46,6 +46,19 @@ bottom-up: every file gets a 1–2 sentence summary, and every directory gets a 
 built from its child file summaries and child directory descriptions — so the root
 describes the whole project. Rows land in `projects` / `directories` / `files`,
 progress in `creation_jobs`, and the blobs in a content-addressed Storage bucket.
+
+## Graph Add, in one paragraph
+
+Adding one document is a two-step wizard on `/api/graph-add`. The upload is summarised, then
+the tree is walked from the root: only child folders whose description (plus a few names
+they hold) aligns with that summary are opened, and the walk stops at leaves, at folders
+where nothing relates, or when its budget runs out — those nodes are the candidates. One
+consolidation call ranks them, and the project root is always offered. The user picks a
+folder and either drops the file there or creates a new folder at that point; the file row
+is written, then the affected folder and its ancestors are re-described bottom-up and their
+counts refreshed, so the tree keeps the invariant Graph Creation established. The suggestion
+is held on an `add_requests` row (24 hours, single use), so placement never re-uploads or
+re-summarises, and blobs stay content-addressed so identical documents share one object.
 
 ## Commands
 
@@ -77,6 +90,8 @@ API docs: <http://localhost:8000/docs> · health: <http://localhost:8000/health>
   `summary_status='skipped'` rather than summarised.
 - Schema changes are SQL in `supabase/migrations/`, reviewed by both of us before they
   are applied to a shared project.
-- **Graph Add and Graph AI Search are not designed yet.** Do not invent their endpoints,
-  schemas or prompts; agree the design first.
+- **Graph AI Search is not designed yet.** Do not invent its endpoints, schemas or prompts;
+  agree the design first. Graph Add's design *is* agreed and built — read
+  `backend/README.md` ("Graph Add endpoints") before changing its routes, prompts or the
+  `add_requests` shape.
 

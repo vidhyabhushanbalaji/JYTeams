@@ -185,6 +185,51 @@ placed, `1` error, `2` name conflict (alternatives are printed), `3` the suggest
 `130` nothing was written because the question was left unanswered. `--show-tree` prints the
 project afterwards using Graph Creation's read route.
 
+### Check the routes without a server
+
+`app/graph_add/tools/verify_add_document.py` is an executable check of the two routes: it
+starts the real app in-process (in-memory repository, offline navigator), seeds a project
+that already contains files, then asserts the whole journey — suggestions, the walk, both
+placement modes, conflicts and renames, single use, expiry and ownership — printing one
+`ok`/`FAIL` line per assertion, then exiting non-zero if anything failed.
+
+```powershell
+# from backend/ — no Supabase, no Gemini, no .env needed
+..\.venv\Scripts\python.exe -m app.graph_add.tools.verify_add_document
+..\.venv\Scripts\python.exe -m app.graph_add.tools.verify_add_document --json
+```
+
+`--json` also dumps the payloads and the final tree. On Unix it is executable as
+`./app/graph_add/tools/verify_add_document.py` (with the virtualenv active). It needs
+`AUTH_MODE=dev`, because it identifies itself the same way the dev header does.
+
+### Check against a real project
+
+`app/graph_add/tools/verify_add_document_live.py` does the same journey against a real
+project: it starts the app in-process (real Supabase repository, Storage and Gemini) and
+drives both routes, asserting the transcript before and after.
+
+```powershell
+# suggestions only: nothing is written
+..\.venv\Scripts\python.exe -m app.graph_add.tools.verify_add_document_live `
+  --project-id <uuid> --user <owner-uuid> --document ..\notes\rollback.md --suggest-only --expect guides
+
+# place it where the walk suggests
+..\.venv\Scripts\python.exe -m app.graph_add.tools.verify_add_document_live `
+  --project-id <uuid> --user <owner-uuid> --document ..\notes\rollback.md
+```
+
+This one **writes**: one `files` row, one Storage object (content-addressed, so a duplicate
+document adds none) and a re-description of the target folder, its ancestors and the project
+— those are billed model calls. `--directory <path|id>` overrides the suggestion,
+`--placement new_directory --new-directory-name <name>` creates a folder first, `--file-name`
+resolves a clash, and `--json` dumps every payload. Exit codes: `0` placed, `1` a check
+failed, `2` the name is taken.
+
+> If Gemini answers `429 RESOURCE_EXHAUSTED`, the free-tier daily quota for that model is
+> spent. `GEMINI_MODEL=gemini-3.5-flash-lite` (a process-only override) usually still has
+> quota; the summaries stored on the project name the model that produced them.
+
 ## Try it locally (upload a directory)
 
 `app/graph_creation/tools/upload_directory.py` uploads a folder and prints the tree:

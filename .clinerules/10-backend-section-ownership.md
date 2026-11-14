@@ -1,14 +1,14 @@
 # Backend Section Ownership — Scoped Writes
 
 The backend is split into three independent sections. Each is a Python package under
-`backend/app/`. **Graph Creation** is implemented; **Graph Add** and **Graph AI Search**
-are still scaffold only and get designed with the team, one section at a time.
+`backend/app/`. **Graph Creation** and **Graph Add** are implemented; **Graph AI Search**
+is still scaffold only and gets designed with the team, one section at a time.
 
-| Section | Directory | HTTP prefix |
-| --- | --- | --- |
-| Graph Creation | `backend/app/graph_creation/` | `/api/graph-creation` |
-| Graph Add | `backend/app/graph_add/` | `/api/graph-add` |
-| Graph AI Search | `backend/app/graph_ai_search/` | `/api/graph-ai-search` |
+| Section | Directory | HTTP prefix | State |
+| --- | --- | --- | --- |
+| Graph Creation | `backend/app/graph_creation/` | `/api/graph-creation` | implemented |
+| Graph Add | `backend/app/graph_add/` | `/api/graph-add` | implemented |
+| Graph AI Search | `backend/app/graph_ai_search/` | `/api/graph-ai-search` | scaffold |
 
 **Shared foundation (no single owner):** `backend/app/main.py`,
 `backend/app/core/`, `backend/app/db/`, `backend/app/health/`, `backend/tests/`,
