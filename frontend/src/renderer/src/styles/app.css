@@ -1186,8 +1186,8 @@ button.chip:hover {
 
 .canvas__hint {
   position: absolute;
-  bottom: 12px;
-  left: 14px;
+  bottom: 14px;
+  left: 58px;
   z-index: 3;
   color: var(--muted-faint);
   font-size: var(--text-xs);
@@ -1223,8 +1223,8 @@ button.chip:hover {
 }
 
 .react-flow__edge-path {
-  stroke: var(--line-strong);
-  stroke-width: 1;
+  stroke: #cdcdc7;
+  stroke-width: 1.25;
 }
 
 .react-flow__controls {
@@ -1446,4 +1446,69 @@ button.chip:hover {
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
   }
+}
+/* ------------------------------------------------- breadcrumb + selection */
+
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.crumbs__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.crumb {
+  overflow: hidden;
+  max-width: 190px;
+  padding: 3px 7px;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background var(--fast) var(--ease), color var(--fast) var(--ease);
+}
+
+button.crumb:hover:not(:disabled) {
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.crumb--current {
+  max-width: 260px;
+  color: var(--ink);
+  font-size: var(--text-body);
+  font-weight: 600;
+  letter-spacing: -0.006em;
+}
+
+.crumb--current:disabled {
+  color: var(--ink);
+  cursor: default;
+}
+
+.crumb__sep {
+  color: var(--muted-faint);
+  font-size: 11px;
+}
+
+/* React Flow owns selection, so nothing has to be rebuilt when a card is chosen. */
+.react-flow__node.selected .node {
+  box-shadow: 0 0 0 1.5px var(--ink), 0 4px 16px rgba(15, 15, 15, 0.1);
+}
+
+.react-flow__node.selected .node--hit {
+  box-shadow: inset 3px 0 0 var(--ink), 0 0 0 1.5px var(--ink), 0 4px 16px rgba(15, 15, 15, 0.1);
+}
+/* A folder that is selected is offering itself to be opened. */
+.node__open--ready {
+  color: var(--ink);
+  font-weight: 600;
 }

@@ -55,7 +55,7 @@ export default function App() {
           <ProjectScreen
             key={view.projectId}
             projectId={view.projectId}
-            onBack={() => setView({ kind: 'home' })}
+
             onOpenSettings={() => setSettingsOpen(true)}
             notify={notify}
           />

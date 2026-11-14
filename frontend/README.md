@@ -35,11 +35,10 @@ $env:JYTEAMS_SMOKE='1'
 .\node_modules\electron\dist\electron.exe .
 ```
 
-It opens the app, clicks the first project, expands one folder, drags a card, round-trips a
-layout through IPC, prints the result as JSON, then quits. Useful in CI, and it is what
-proved the graph wiring while this was built. (Synthetic PointerEvents do not reliably
-start React Flow\'s d3-drag, so it reports whether the card is draggable and whether the
-position store round-trips rather than pixel movement.)
+It opens the app, clicks the first project, reports the wheel (cards, centre, crumbs and any
+overlapping rectangles), drills into a folder, comes back, tidies, and round-trips a layout
+through IPC - printing each result as JSON. Set JYTEAMS_SMOKE_DIR to also save a PNG after
+every step, which is how the wheel was reviewed.
 
 ## How it talks to the backend
 
@@ -80,22 +79,35 @@ in the repository.
    cards are outlined on the canvas, the folders the walk opened are marked, and everything
    else dims. Clicking a hit expands the ancestors it needs and centres the file.
 
-## The graph rules
+## The tree
 
-`src/renderer/src/lib/treeToGraph.ts` is the only place the visible set is decided:
+One folder sits at the top. Its **files hang from short branches** just below it, its
+**immediate subfolders from longer branches** further down, and nothing deeper is drawn until
+you press a folder - once to select it (the panel on the right describes it) and again to open
+it, which makes it the top of a new tree. **Back** (or any breadcrumb segment) returns to the
+previous folder, and because positions are remembered per view, it returns to exactly the
+layout you left.
 
-- the tree is read once with `GET /projects/{id}/tree?depth=3`, which returns the root and
-  **two further tiers of folders**;
-- the root is always open, every deeper folder starts collapsed;
-- a folder's files appear only when that folder is expanded - so the canvas opens calm and
-  never draws a fourth tier on its own;
-- expanding a folder uses the files already in the payload when it can, and calls
-  `GET /directories/{id}` only when the depth-limited read hid its children (or after a
-  placement changed the tree).
+`lib/focusGraph.ts` decides what a view contains (one folder, its direct files, its direct
+subfolders - never grandchildren). `lib/treeLayout.ts` decides where the cards go:
 
-Positions are per project: dagre lays the visible graph out left-to-right, and anything you
-drag is stored in `userData/layouts/<project>.json` and takes priority over the layout.
-**Tidy layout** clears them and re-runs dagre.
+- a single trunk runs down `x = 0`, and **no card is ever placed on it**, so a folder branch
+  can travel past the whole file band without crossing a card;
+- cards sit in rows of up to four, at `-150, +150, -414, +414`, so every row is mirrored
+  around the trunk and a crowded band grows downwards instead of sideways;
+- `treeLayout.test.ts` asserts that no two card rectangles intersect (eleven child counts),
+  that every card is below the centre, that the trunk stays clear, and that the whole file
+  band sits above the folder band.
+
+Each branch is drawn by `components/TreeEdge.tsx`: down the trunk, across a rail just above
+the child row, then into the card. Short branches (files) barely leave the centre; long ones
+(folders) run the height of the file band first. Every edge draws its own trunk segment and
+they overlap exactly, which is why the tree reads as one trunk.
+
+Dragging: nodes live in the React Flow store (`useNodesState` + `applyNodeChanges`), so a drag
+updates one node object and only that card re-renders. Selection does not rebuild the array
+either - it replaces at most the two cards whose flag changed - so nothing flickers and
+nothing snaps back on drop.
 
 ## Design system
 
@@ -122,8 +134,8 @@ src/
 │  └─ fs/walk.ts          # folder walk: markdown only, POSIX relative paths, limits
 ├─ preload/               # contextBridge surface + its .d.ts
 └─ renderer/src/
-   ├─ lib/                # treeToGraph, layout, format, errors (pure, unit tested)
-   ├─ state/              # useProjectGraph, useProjects, useSearch, usePositions, useToasts
+   ├─ lib/                # focusGraph, treeLayout, format, errors (pure, unit tested)
+   ├─ state/              # useFocusGraph, useProjects, useSearch, usePositions, useToasts
    ├─ components/         # rail, home, project, canvas, nodes, inspector, the two flows
    └─ styles/             # tokens.css, app.css
 ```
@@ -145,3 +157,5 @@ src/
   into Settings for `AUTH_MODE=supabase`, but a real sign-in flow is the next piece.
 - **Packaging is configured, not signed.** `electron-builder.yml` builds NSIS on Windows and
   DMG on macOS unsigned; signing/notarisation needs certificates and must run on each OS.
+- **No layout library.** The tree is a row grid with a tested overlap guarantee, so
+  @dagrejs/dagre was removed when the left-to-right tree went away.
