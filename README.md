@@ -9,17 +9,18 @@ a hierarchy, and `ltree` in Postgres covers it.
 
 ## Status
 
-**Backend only.** The API boots, health probes work, and **Graph Creation and Graph Add**
-**are implemented**: upload a directory of markdown files and you get a described tree
-(per-file summaries, per-directory descriptions produced bottom-up); add a single document
-and the service walks that tree to suggest where it belongs, then places it in the folder
-you choose. Graph AI Search is still an empty scaffold, designed with the team next.
+**Backend only.** The API boots, health probes work, and **all three sections are
+implemented**: upload a directory of markdown files and you get a described tree (per-file
+summaries, per-directory descriptions produced bottom-up); add a single document and the
+service walks that tree to suggest where it belongs, then places it in the folder you choose;
+and search a project for the document that answers a question, ranking hits from the same
+stored summaries. Details for each: [`backend/README.md`](backend/README.md).
 
 | Section | Directory | HTTP prefix | State |
 | --- | --- | --- | --- |
 | Graph Creation | `backend/app/graph_creation/` | `/api/graph-creation` | implemented |
 | Graph Add | `backend/app/graph_add/` | `/api/graph-add` | implemented |
-| Graph AI Search | `backend/app/graph_ai_search/` | `/api/graph-ai-search` | scaffold |
+| Graph AI Search | `backend/app/graph_ai_search/` | `/api/graph-ai-search` | implemented |
 
 ## Quickstart (backend)
 

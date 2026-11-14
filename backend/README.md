@@ -156,6 +156,92 @@ steps, so placement never re-uploads or re-summarises the document. Without a
 `GEMINI_API_KEY` a deterministic mock navigator is used (keyword overlap, same code paths),
 which is also what the tests exercise.
 
+## Graph AI Search endpoints
+
+Mounted under `/api/graph-ai-search`. One read endpoint: it walks the project tree for a query
+and returns the documents that answer it, ranked. **Nothing is written**, so it is safe to call
+repeatedly.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/projects/{project_id}/search?q=…` | Ranked documents that answer the query |
+
+| Query param | Default | Meaning |
+| --- | --- | --- |
+| `q` | — | What you are looking for (3–500 characters after trimming) |
+| `limit` | `8` | Results to return (1–25) |
+| `min_score` | `0.0` | Drop hits below this score |
+| `max_directories` | *(unset)* | Optional valve: stop after opening this many folders. Unset means the walk runs until its frontier is empty |
+
+```json
+{
+  "query": "how do I roll back a bad production release",
+  "project_id": "014c45b7-…",
+  "results": [
+    {
+      "file_id": "ff230d49-…",
+      "name": "rollback-deployment.md",
+      "path": "guides/rollback-deployment.md",
+      "directory_id": "dd473be5-…",
+      "directory_path": "guides",
+      "summary": "This document provides a step-by-step guide for performing a Helm rollback…",
+      "score": 0.92,
+      "reason": "This guide provides a direct, step-by-step procedure for performing a Helm rollback in a production environment."
+    }
+  ],
+  "opened_directories": ["", "guides"],
+  "traversal": {
+    "directories_visited": 2, "directories_opened": 2, "documents_considered": 6,
+    "fallback_used": false, "degraded": false, "budget_exhausted": false,
+    "model": "gemini-3.5-flash-lite"
+  }
+}
+```
+
+Errors: `400` query too short/long or a numeric parameter out of range, `404` unknown or
+unowned project, `409` project has no tree, `502` the model could not search, `503` Supabase
+not configured.
+
+### How a search runs
+
+1. **Walk** (`search.py`) — start at the root. One model call per folder answers both
+   questions at once: which files *here* answer the query, and which subfolders could contain
+   an answer. Every matching file is logged; every matching subfolder is opened. **There is no
+   expansion budget** — the walk ends when the frontier is empty, so cost follows how much of
+   the tree the model finds relevant. Folders are presented with their description plus a few
+   names they hold, because a vague description would otherwise hide a relevant branch.
+2. **Fallback** — if the walk logs nothing *and* the project has at most 40 documents, every
+   folder is swept once, so a folder whose description happens to be generic cannot hide its
+   files. `fallback_used` reports it. The `max_directories` valve disables the sweep — a
+   bounded request must not turn into an unbounded one.
+3. **Rank** — one consolidation call orders the logged files (`RANK_BATCH` = 25, at least the
+   maximum `limit`, so trimming never loses a rankable document). Larger logs are ranked in
+   batches and the winners are consolidated, because scores from separate calls are not
+   comparable. A failed folder call marks the response `degraded` and skips that subtree; a
+   failed ranking falls back to per-folder relevance. The route still answers `200` in both
+   cases, which is what happens when the model's quota runs out.
+
+Search runs on the stored summaries and descriptions — the documents themselves are never
+read. A query whose wording is absent from every summary cannot be found; that is the
+trade-off of using the tree as the index.
+
+### Check it without a quota
+
+```powershell
+# offline: the PulseAPI example tree, real stored summaries, mock searcher
+..\.venv\Scripts\python.exe -m app.graph_ai_search.tools.verify_search
+
+# live, read-only, against a real project (needs SUPABASE_* and GEMINI_API_KEY)
+..\.venv\Scripts\python.exe -m app.graph_ai_search.tools.verify_search_live `
+  --project-id <uuid> --user <owner-uuid> [--only rollback] [--limit 5]
+```
+
+`verify_search` seeds the exact example tree from the database (six documents), runs five
+queries plus a negative control, and asserts the expected document comes back in the top two.
+`verify_search_live` does the same through the real route against a real project — search
+never writes, so it is safe to run any time. Both print one `ok`/`FAIL` line per assertion and
+exit non-zero on failure.
+
 ## Try it locally (add one document)
 
 `app/graph_add/tools/add_file.py` drives the two routes the way the wizard does: it prints
@@ -316,7 +402,7 @@ app/
 │  ├─ storage.py      # content-addressed blob upload
 │  ├─ repository.py   # PostgREST access (add_requests + tree writes)
 │  └─ tests/
-└─ graph_ai_search/   # SECTION — empty scaffold, design TBD
+└─ graph_ai_search/   # SECTION — implemented (search the tree's summaries)
 ```
 
 ## Configuration

@@ -1,7 +1,15 @@
-"""Graph AI Search section — deliberately empty scaffold.
+"""Graph AI Search section.
 
-Design is agreed with the team before code is written (see
-``.clinerules/10-backend-section-ownership.md``). Endpoints go in this router; anything
-the section needs beyond that belongs inside this package. ``GEMINI_API_KEY`` is reserved
-in ``backend/.env`` for this section and is not read anywhere yet.
+Answers "which document deals with this?" from the tree Graph Creation built, without reading
+the documents themselves — the stored per-file summaries and per-directory descriptions are
+the index.
+
+The agreed algorithm lives in ``search.py``: start at the root, log every child file whose
+summary matches the query, recurse into every child folder whose description matches, and
+keep going until the frontier is empty. There is no expansion budget; a small project that
+finds nothing by that route gets one exhaustive sweep instead. The logged files are then
+ranked in a single consolidation pass (batched when the log is large), because relevance
+values from separate model calls are not comparable.
+
+Read-only: no tables of its own, no job rows, no writes to the project.
 """

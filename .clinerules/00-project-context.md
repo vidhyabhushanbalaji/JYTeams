@@ -12,7 +12,7 @@ An Electron desktop app that makes Microsoft Teams project information easier to
 | Auth | Supabase Auth (bearer token); `AUTH_MODE=dev` trusts `X-Dev-User-Id` locally |
 | Data | Supabase **Postgres** (the tree, via `ltree`) + Supabase **Storage** (markdown files) |
 | LLM | Gemini via `google-genai` — file and directory summaries, and the navigation that places a new document |
-| Graph DB | **None.** Neo4j was retired; re-add it only if Graph AI Search needs traversal |
+| Graph DB | **None.** Neo4j was retired; Graph AI Search walks the `ltree` hierarchy instead |
 
 ## Layout
 
@@ -25,7 +25,7 @@ backend/
 │  ├─ health/              # /health, /health/supabase
 │  ├─ graph_creation/      # SECTION — implemented (upload a directory → described tree)
 │  ├─ graph_add/           # SECTION — implemented (place one document in that tree)
-│  └─ graph_ai_search/     # SECTION — scaffold only (empty router)
+│  └─ graph_ai_search/     # SECTION — implemented (search the tree's summaries)
 ├─ tests/                  # cross-cutting tests (health, config, wiring)
 ├─ requirements.txt        # runtime deps (pinned)
 ├─ requirements-dev.txt    # -r requirements.txt + pytest / ruff / httpx2
@@ -60,6 +60,20 @@ counts refreshed, so the tree keeps the invariant Graph Creation established. Th
 is held on an `add_requests` row (24 hours, single use), so placement never re-uploads or
 re-summarises, and blobs stay content-addressed so identical documents share one object.
 
+## Graph AI Search, in one paragraph
+
+Search is one read-only endpoint on `/api/graph-ai-search`. The walk starts at the project
+root and makes one model call per folder, answering both questions at once: which files
+*here* answer the query, and which subfolders could contain an answer. Every matching file is
+logged and **every** matching subfolder is opened — there is no expansion budget, so the walk
+ends when its frontier is empty and the cost follows how much of the tree the model finds
+relevant (`max_directories` is an optional valve that also disables the fallback). If nothing
+is logged and the project has at most 40 documents, every folder is swept once, so a vague
+description cannot hide a branch. The logged files are then ranked in one consolidation call,
+batched when the log is large, because relevance values from separate calls are not
+comparable. It reads nothing but the stored summaries and descriptions, writes nothing, and
+needs no tables of its own — so a query whose wording appears in no summary cannot be found.
+
 ## Commands
 
 All backend commands run from `backend/`, using the repo-root virtualenv:
@@ -90,8 +104,10 @@ API docs: <http://localhost:8000/docs> · health: <http://localhost:8000/health>
   `summary_status='skipped'` rather than summarised.
 - Schema changes are SQL in `supabase/migrations/`, reviewed by both of us before they
   are applied to a shared project.
-- **Graph AI Search is not designed yet.** Do not invent its endpoints, schemas or prompts;
-  agree the design first. Graph Add's design *is* agreed and built — read
-  `backend/README.md` ("Graph Add endpoints") before changing its routes, prompts or the
-  `add_requests` shape.
+- **Graph Add is designed and built** — read `backend/README.md` ("Graph Add endpoints")
+  before changing its routes, prompts or the `add_requests` shape.
+- **Graph AI Search is designed and built** — its walk, the fallback sweep, the optional
+  `max_directories` valve and the ranking contract are agreed. Read
+  `backend/README.md` ("Graph AI Search endpoints") before changing its routes, prompts or
+  `search.py`, and keep it read-only: it must never write to a project.
 
