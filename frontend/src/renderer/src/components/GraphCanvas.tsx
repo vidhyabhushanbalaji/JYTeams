@@ -167,7 +167,7 @@ function Canvas({
     fittedFor.current = viewKey
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
     const timer = window.setTimeout(() => {
-      void fitView({ duration: reduced ? 0 : 280, padding: 0.18 })
+      void fitView({ duration: reduced ? 0 : 280, padding: 0.18, maxZoom: 1.08 })
     }, 60)
     return () => window.clearTimeout(timer)
   }, [viewKey, fitView])
@@ -196,17 +196,22 @@ function Canvas({
       minZoom={0.12}
       maxZoom={1.8}
       fitView
-      fitViewOptions={{ padding: 0.18 }}
+      fitViewOptions={{ padding: 0.18, maxZoom: 1.08 }}
       defaultEdgeOptions={{ type: 'branch' }}
     >
       <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="#e3e3df" />
       <MiniMap
         pannable
         zoomable
+        style={{ width: 132, height: 96 }}
+        offsetScale={16}
         nodeColor={(node) =>
           (node.data as GraphNodeData | undefined)?.node?.kind === 'centre' ? '#191919' : '#d3d3ce'
         }
-        maskColor="rgba(255, 255, 255, 0.72)"
+        nodeStrokeWidth={0}
+        nodeBorderRadius={2}
+        maskColor="rgba(255, 255, 255, 0.82)"
+        ariaLabel="Project map"
       />
       <Controls showInteractive={false} />
     </ReactFlow>

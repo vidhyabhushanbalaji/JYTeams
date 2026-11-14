@@ -52,7 +52,7 @@ ol {
 :focus-visible {
   outline: none;
   box-shadow: var(--ring);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
 }
 
 .mono {
@@ -1225,6 +1225,8 @@ button.chip:hover {
 .react-flow__edge-path {
   stroke: #cdcdc7;
   stroke-width: 1.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .react-flow__controls {
@@ -1252,9 +1254,10 @@ button.chip:hover {
 
 .react-flow__minimap {
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
   background: var(--paper);
   box-shadow: none;
+  margin: 0 15px 26px 0;
 }
 
 .react-flow__minimap-mask {

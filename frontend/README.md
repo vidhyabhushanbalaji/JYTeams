@@ -91,18 +91,20 @@ layout you left.
 `lib/focusGraph.ts` decides what a view contains (one folder, its direct files, its direct
 subfolders - never grandchildren). `lib/treeLayout.ts` decides where the cards go:
 
-- a single trunk runs down `x = 0`, and **no card is ever placed on it**, so a folder branch
-  can travel past the whole file band without crossing a card;
-- cards sit in rows of up to four, at `-150, +150, -414, +414`, so every row is mirrored
-  around the trunk and a crowded band grows downwards instead of sideways;
-- `treeLayout.test.ts` asserts that no two card rectangles intersect (eleven child counts),
-  that every card is below the centre, that the trunk stays clear, and that the whole file
-  band sits above the folder band.
+- a single stem runs down `x = 0`, and **no child card is ever placed on it**, so a folder
+  branch can travel past the whole file band without crossing a card;
+- cards sit in rows of up to four, at `-174, +174, -474, +474`, and every card is nudged by a
+  small offset derived from a hash of its id - hand-placed to look at, but identical on every
+  render, session and machine, so nothing re-shuffles under your cursor;
+- `treeLayout.test.ts` lays out 300 id sets and asserts that no two rectangles intersect,
+  that every card stays inside its jitter budget, that children sit below the centre, that
+  the stem stays clear, and that the whole file band sits above the folder band.
 
-Each branch is drawn by `components/TreeEdge.tsx`: down the trunk, across a rail just above
-the child row, then into the card. Short branches (files) barely leave the centre; long ones
-(folders) run the height of the file band first. Every edge draws its own trunk segment and
-they overlap exactly, which is why the tree reads as one trunk.
+Each branch is a cubic curve (`components/TreeEdge.tsx`) from the centre underside to the
+child top. The control points turn late, so a short branch (a file) leaves the stem and
+arrives almost at once while a long one (a folder) drops past the file band first. A seeded
+sway and a 1.0-1.4 px stroke give every branch its own weight, and the geometry comes from
+the live nodes, so a dragged card keeps its branch.
 
 Dragging: nodes live in the React Flow store (`useNodesState` + `applyNodeChanges`), so a drag
 updates one node object and only that card re-renders. Selection does not rebuild the array
