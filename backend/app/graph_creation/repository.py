@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from fastapi import HTTPException, status
+from postgrest.exceptions import APIError
 from starlette.concurrency import run_in_threadpool
 
 from app.db.supabase import admin_client
@@ -15,6 +17,27 @@ from app.db.supabase import admin_client
 Row = dict[str, Any]
 
 _INSERT_BATCH = 500
+
+
+class SupabaseRequestError(HTTPException):
+    """Supabase/PostgREST rejected a request (API key, RLS policy or schema problem)."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=message)
+
+
+def _describe_api_error(exc: APIError) -> str:
+    """Turn a PostgREST error into something that says what to fix."""
+    message = str(getattr(exc, "message", None) or exc)
+    if getattr(exc, "code", None) == "42501":
+        message += (
+            " - the request ran without service-role privileges; check that"
+            " SUPABASE_SERVICE_ROLE_KEY holds the secret key (sb_secret_...) and not"
+            " the publishable key, then restart the API"
+        )
+    if getattr(exc, "hint", None):
+        message += f" (hint: {exc.hint})"
+    return f"Supabase rejected the request: {message}"
 
 
 class GraphRepository(Protocol):
@@ -52,12 +75,19 @@ class GraphRepository(Protocol):
 class SupabaseGraphRepository:
     """PostgREST-backed repository (service role client, so RLS does not apply)."""
 
+    async def _run(self, operation):
+        """Run a blocking PostgREST call, surfacing Supabase errors as HTTP errors."""
+        try:
+            return await run_in_threadpool(operation)
+        except APIError as exc:
+            raise SupabaseRequestError(_describe_api_error(exc)) from exc
+
     async def _one(self, builder_factory: Any) -> Row | None:
         def run() -> Row | None:
             response = builder_factory().execute()
             return response.data[0] if response.data else None
 
-        return await run_in_threadpool(run)
+        return await self._run(run)
 
     async def create_project(self, *, owner_id: str, name: str) -> Row:
         def run() -> Row:
@@ -65,7 +95,7 @@ class SupabaseGraphRepository:
             response = builder.execute()
             return response.data[0]
 
-        return await run_in_threadpool(run)
+        return await self._run(run)
 
     async def update_project(self, project_id: str, fields: Row) -> Row:
         def run() -> Row:
@@ -73,7 +103,7 @@ class SupabaseGraphRepository:
             response = builder.execute()
             return response.data[0]
 
-        return await run_in_threadpool(run)
+        return await self._run(run)
 
     async def get_project(self, project_id: str) -> Row | None:
         return await self._one(
@@ -92,7 +122,7 @@ class SupabaseGraphRepository:
             )
             return response.data or []
 
-        return await run_in_threadpool(run)
+        return await self._run(run)
 
     async def create_job(
         self, *, project_id: str, owner_id: str, mode: str, total_files: int
@@ -109,7 +139,7 @@ class SupabaseGraphRepository:
             response = admin_client().table("creation_jobs").insert(payload).execute()
             return response.data[0]
 
-        return await run_in_threadpool(run)
+        return await self._run(run)
 
     async def update_job(self, job_id: str, fields: Row) -> Row:
         def run() -> Row:
@@ -118,7 +148,7 @@ class SupabaseGraphRepository:
             )
             return response.data[0]
 
-        return await run_in_threadpool(run)
+        return await self._run(run)
 
     async def get_job(self, job_id: str) -> Row | None:
         return await self._one(
@@ -134,7 +164,7 @@ class SupabaseGraphRepository:
                 response = admin_client().table(table).insert(batch).execute()
                 return response.data or []
 
-            inserted.extend(await run_in_threadpool(run))
+            inserted.extend(await self._run(run))
         return inserted
 
     async def insert_directories(self, rows: list[Row]) -> list[Row]:
@@ -150,7 +180,7 @@ class SupabaseGraphRepository:
             )
             return response.data[0]
 
-        return await run_in_threadpool(run)
+        return await self._run(run)
 
     async def get_directory(self, directory_id: str) -> Row | None:
         return await self._one(
@@ -163,7 +193,7 @@ class SupabaseGraphRepository:
             response = builder.execute()
             return response.data or []
 
-        return await run_in_threadpool(run)
+        return await self._run(run)
 
     async def list_files(self, project_id: str) -> list[Row]:
         def run() -> list[Row]:
@@ -172,4 +202,4 @@ class SupabaseGraphRepository:
             )
             return response.data or []
 
-        return await run_in_threadpool(run)
+        return await self._run(run)

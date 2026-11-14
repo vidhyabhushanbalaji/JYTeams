@@ -33,7 +33,8 @@ def extract_text(data: bytes, *, filename: str, max_chars: int) -> Extracted:
         return Extracted(None, f"unsupported file type {suffix or '(none)'}")
 
     try:
-        text = data.decode("utf-8")
+        # utf-8-sig accepts plain UTF-8 and strips a BOM (common on Windows).
+        text = data.decode("utf-8-sig")
     except UnicodeDecodeError:
         return Extracted(None, "file is not valid UTF-8")
 

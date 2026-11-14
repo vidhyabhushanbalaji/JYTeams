@@ -35,6 +35,19 @@ With an empty `.env` the API still starts: `/health` works, `/health/supabase` r
 ..\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
 ```
 
+> **If the port is taken** (`ERROR: [WinError 10013]` / `[WinError 10048]`), another
+> process already owns it - on this machine a different project's API sits on 8000.
+>
+> Find the owner with `netstat -ano | Select-String ':8000'` (last column is the PID),
+> then either stop that process or pick another port:
+>
+> ```powershell
+> ..\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8001
+> ```
+>
+> A port can also be unusable while Windows still holds a stale socket after a killed
+> process - use another one rather than fighting it.
+
 | URL | Purpose |
 | --- | --- |
 | <http://localhost:8000/docs> | Swagger UI (try the upload straight from here) |
@@ -79,6 +92,29 @@ curl.exe -X POST http://localhost:8000/api/graph-creation/uploads `
 
 curl.exe http://localhost:8000/api/graph-creation/jobs/<job_id>
 ```
+
+## Try it locally (upload a directory)
+
+`app/graph_creation/tools/upload_directory.py` uploads a folder and prints the tree:
+
+```powershell
+# preview only: validate the folder and show the tree + bottom-up order, no network
+..\.venv\Scripts\python.exe -m app.graph_creation.tools.upload_directory ..\..\docs --dry-run
+
+# real upload against a running API, then print what was stored
+..\.venv\Scripts\python.exe -m app.graph_creation.tools.upload_directory ..\..\docs --url http://127.0.0.1:8001 --name Docs
+
+# extend an existing project
+..\.venv\Scripts\python.exe -m app.graph_creation.tools.upload_directory ..\..\docs --mode add --project-id <uuid>
+```
+
+Options: `--url`, `--mode new|add`, `--name`, `--project-id`, `--token` (Supabase
+bearer token; otherwise the `X-Dev-User-Id` header is sent), `--depth`, `--timeout`,
+`--interval`, `--json`, `--full`.
+
+`--dry-run` uses the offline mock summariser; a live run uses Gemini when
+`GEMINI_API_KEY` is set. Either way the tree structure - empty-directory pruning,
+natural ordering, `ltree` paths - is identical to what the API stores.
 
 ## How the tree is built
 
