@@ -1,15 +1,20 @@
-r"""Upload a local directory to a running JYTeams API and print the resulting tree.
+r"""Upload a local directory or a single .zip archive and print the resulting tree.
 
 Run from ``backend/``:
 
-    python -m app.graph_creation.tools.upload_directory ..\..\docs
-    python -m app.graph_creation.tools.upload_directory ..\..\docs --dry-run
-    python -m app.graph_creation.tools.upload_directory ..\..\docs --mode add --project-id <uuid>
+    python -m app.graph_creation.tools.upload_directory ..\test_docs
+    python -m app.graph_creation.tools.upload_directory ..\test_docs.zip
+    python -m app.graph_creation.tools.upload_directory ..\test_docs --dry-run
+    python -m app.graph_creation.tools.upload_directory ..\test_docs --mode add --project-id <uuid>
 
-The live run uploads the directory, polls the creation job and then prints the tree exactly
-as the API returns it (directory descriptions and per-file summaries). ``--dry-run`` never
-touches the network: it validates the directory and previews the same bottom-up summaries
-with the offline mock summariser, which is useful before Supabase is configured.
+A directory is uploaded as loose multipart parts; a ``.zip`` is uploaded whole, as one part,
+and the API expands it - the same validated path a browser upload takes. The live run polls
+the creation job and prints the tree exactly as the API returns it. ``--dry-run`` never
+touches the network: it validates the input and previews the same bottom-up summaries with
+the offline mock summariser, which is useful before Supabase is configured.
+
+``Compress-Archive -Path .\test_docs`` prefixes every entry with ``test_docs/``, which shows
+up as an extra top-level folder; zip the contents (``.\test_docs\*``) for a flat tree.
 """
 
 from __future__ import annotations
@@ -20,12 +25,14 @@ import json
 import sys
 import textwrap
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
 from app.core.config import get_settings
 from app.graph_creation.extract import extract_text
+from app.graph_creation.ingest import entries_from_zip
 from app.graph_creation.summarise import MockSummarizer
 from app.graph_creation.tree import (
     DirectoryNode,
@@ -78,6 +85,46 @@ def collect_local_files(directory: Path) -> list[tuple[str, bytes]]:
     if not collected:
         raise SystemExit(f"no files found in {directory}")
     return collected
+
+
+@dataclass(frozen=True)
+class LocalUpload:
+    """A directory or archive read from disk, ready to preview or upload."""
+
+    entries: list[tuple[str, bytes]]
+    archive: bytes | None = None
+    archive_name: str | None = None
+
+
+def load_upload(path: Path) -> LocalUpload:
+    """Read a directory or a single ``.zip`` archive into ``(posix path, bytes)`` pairs.
+
+    A directory is sent as loose parts; an archive is sent whole, so the API expands it
+    with the same validation (zip-slip, sizes, counts) a browser upload goes through.
+    """
+    if path.is_dir():
+        return LocalUpload(entries=collect_local_files(path))
+
+    if not (path.is_file() and path.suffix.lower() == ".zip"):
+        raise SystemExit(f"not a directory or .zip archive: {path}")
+
+    settings = get_settings()
+    archive = path.read_bytes()
+    try:
+        extracted = entries_from_zip(
+            archive,
+            max_files=settings.max_upload_files,
+            max_file_bytes=settings.max_file_bytes,
+            max_total_bytes=settings.max_upload_bytes,
+        )
+    except UploadValidationError as exc:
+        raise SystemExit(f"invalid archive {path.name}: {exc}") from exc
+
+    return LocalUpload(
+        entries=[(entry.path, entry.data) for entry in extracted],
+        archive=archive,
+        archive_name=path.name,
+    )
 
 
 def emit(text: str | None, indent: str, *, full: bool) -> None:
@@ -164,8 +211,8 @@ def _print_local(
         _print_local(child, summaries, descriptions, full=full, prefix=prefix + "    ")
 
 
-async def upload_and_print(args: argparse.Namespace, entries: list[tuple[str, bytes]]) -> int:
-    """Upload the directory, follow the job, then print the stored tree."""
+async def upload_and_print(args: argparse.Namespace, upload: LocalUpload) -> int:
+    """Upload the directory or archive, follow the job, then print the stored tree."""
     base = args.url.rstrip("/")
     headers = (
         {"Authorization": f"Bearer {args.token}"}
@@ -177,11 +224,20 @@ async def upload_and_print(args: argparse.Namespace, entries: list[tuple[str, by
         form["name"] = args.name
     if args.project_id:
         form["project_id"] = args.project_id
-    files = [("files", (path, data, "text/markdown")) for path, data in entries]
+    if upload.archive is not None:
+        name = upload.archive_name or "upload.zip"
+        files = [("files", (name, upload.archive, "application/zip"))]
+    else:
+        files = [("files", (path, data, "text/markdown")) for path, data in upload.entries]
 
     timeout = httpx.Timeout(120.0, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
-        print(f"POST {base}{API_PREFIX}/uploads  ({len(entries)} file(s), mode={args.mode})")
+        source = (
+            f"{len(upload.entries)} file(s) in {upload.archive_name}"
+            if upload.archive_name
+            else f"{len(upload.entries)} file(s)"
+        )
+        print(f"POST {base}{API_PREFIX}/uploads  ({source}, mode={args.mode})")
         response = await client.post(f"{base}{API_PREFIX}/uploads", data=form, files=files)
         if response.status_code >= 400:
             print(f"upload rejected: HTTP {response.status_code}\n{_detail(response)}")
@@ -281,7 +337,9 @@ def build_parser() -> argparse.ArgumentParser:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("directory", type=Path, help="local directory to upload")
+    parser.add_argument(
+        "source", metavar="path", type=Path, help="local directory or .zip archive to upload"
+    )
     parser.add_argument(
         "--url",
         default="http://127.0.0.1:8000",
@@ -318,10 +376,15 @@ async def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     args = build_parser().parse_args(argv)
-    entries = collect_local_files(args.directory)
+    upload = load_upload(args.source)
     if args.dry_run:
-        return await preview_local(entries, full=args.full)
-    return await upload_and_print(args, entries)
+        return await preview_local(upload.entries, full=args.full)
+    try:
+        return await upload_and_print(args, upload)
+    except httpx.HTTPError as exc:
+        print(f"could not reach the API at {args.url}: {exc}")
+        print("start it with: ..\\.venv\\Scripts\\python.exe -m uvicorn app.main:app --port 8000")
+        return 1
 
 
 if __name__ == "__main__":
