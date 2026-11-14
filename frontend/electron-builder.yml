@@ -1,0 +1,25 @@
+appId: com.jyteams.desktop
+productName: JYTeams
+copyright: Charlie and Bhushan
+directories:
+  output: dist
+  buildResources: build
+files:
+  - out/**
+  - package.json
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
