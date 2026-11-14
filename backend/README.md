@@ -15,11 +15,13 @@ Copy-Item .env.example .env    # then fill in the Supabase / Gemini values
 
 Then prepare Supabase:
 
-1. **Schema** — apply [`../supabase/migrations/0001_graph_creation.sql`](../supabase/migrations/0001_graph_creation.sql)
-   either by pasting it into the dashboard SQL editor, or with the CLI:
+1. **Schema** — apply
+   [`../supabase/migrations/0001_graph_creation.sql`](../supabase/migrations/0001_graph_creation.sql)
+   and [`../supabase/migrations/0002_graph_add.sql`](../supabase/migrations/0002_graph_add.sql)
+   either by pasting them into the dashboard SQL editor, or with the CLI:
    `npx supabase link --project-ref <ref>` then `npx supabase db push`.
-   It creates `projects`, `directories`, `files`, `creation_jobs`, enables `ltree` and
-   adds row level security policies.
+   The first creates `projects`, `directories`, `files`, `creation_jobs`, enables `ltree`
+   and adds row level security policies; the second adds `add_requests` for Graph Add.
 2. **Storage** — create a **private** bucket named `project-files` (Storage → New bucket),
    or point `STORAGE_BUCKET` at whatever you call it.
 3. **Auth** — for real tokens set `AUTH_MODE=supabase`. `AUTH_MODE=dev` (the default)
@@ -92,6 +94,93 @@ curl.exe -X POST http://localhost:8000/api/graph-creation/uploads `
 
 curl.exe http://localhost:8000/api/graph-creation/jobs/<job_id>
 ```
+
+## Graph Add endpoints
+
+All are mounted under `/api/graph-add` and require an identity (bearer token, or
+`X-Dev-User-Id` in dev mode). Adding a document is a two-step wizard: suggest, then place.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/suggestions` | Upload one markdown document → ranked places it could go |
+| `POST` | `/placements` | Commit the user's choice (that directory, or a new folder under it) |
+| `GET` | `/suggestions/{request_id}` | Re-read the suggestions that were shown |
+
+`POST /suggestions` (multipart): `file` — a single `.md`/`.markdown`/`.mdx`; `project_id` —
+the tree to extend. The response carries `request_id`, the document `summary`, and up to
+three ranked `suggestions` plus the project root, each with `score`, `reason`,
+`proposed_new_directory_names`, `name_available`, `suggested_file_names` (free names when
+the uploaded name clashes) and `identical_content_at` (paths holding the same bytes).
+`traversal` reports what the walk cost and whether it had to stop early (`degraded`,
+`budget_exhausted`).
+
+`POST /placements` (JSON):
+
+| Field | Meaning |
+| --- | --- |
+| `request_id` | From the suggestion response (expires after 24 hours, single use) |
+| `directory_id` | The suggestion the user picked (or the root) |
+| `placement` | `direct` puts the file in that directory; `new_directory` creates a folder under it |
+| `new_directory_name` | Folder name, required for `new_directory` |
+| `file_name` | Optional rename, used to resolve a clash |
+
+Errors: `400` bad name/empty upload, `404` unknown or unowned project/directory/request,
+`409` a path already exists (with `suggested_names`) or the suggestion was already used,
+`410` the suggestion expired, `415` not markdown, `502` the model could not summarise the
+document.
+
+Duplicates are allowed: the same bytes may live at several paths, because blobs are
+content-addressed — only an identical `(project_id, path)` is a conflict.
+
+### How a document is placed
+
+1. **Summary** — the document is summarised exactly like a Graph Creation file.
+2. **Walk** (`navigate.py`) — starting at the root, the model judges which child folders
+   relate to the summary, seeing each folder's description, a few names it contains, and its
+   counts; only the matching ones are opened. A node becomes a *candidate* when it is a leaf,
+   when none of its children relate, or when the budget is spent. Bounded by
+   `MAX_EXPANSIONS` (8) calls, `MAX_BRANCH` (3) children per node and `MAX_CANDIDATES` (3)
+   results.
+3. **Rank** — one consolidation call orders the shortlist, because scores from separate
+   calls are not comparable. The root is always offered as a last option.
+4. **Place** — every check runs first, so a rejected placement writes nothing; then the file
+   row is written (creating the folder first if asked), and the affected directory and its
+   ancestors are re-described bottom-up and their child counts refreshed, so the tree keeps
+   the invariant Graph Creation established.
+
+The uploaded bytes and the suggestions are held on an `add_requests` row between the two
+steps, so placement never re-uploads or re-summarises the document. Without a
+`GEMINI_API_KEY` a deterministic mock navigator is used (keyword overlap, same code paths),
+which is also what the tests exercise.
+
+## Try it locally (add one document)
+
+`app/graph_add/tools/add_file.py` drives the two routes the way the wizard does: it prints
+the ranked places the document could go, asks which one to use and whether to create a
+folder there, then commits the choice.
+
+```powershell
+# preview only: validate the file and show what would be sent, no network
+..\.venv\Scripts\python.exe -m app.graph_add.tools.add_file ..\..\notes\auth.md --dry-run
+
+# live, interactive: pick a suggestion, then direct or new folder
+..\.venv\Scripts\python.exe -m app.graph_add.tools.add_file ..\..\notes\auth.md --project-id <uuid>
+
+# unattended: take suggestion 1 and put the file in that folder
+..\.venv\Scripts\python.exe -m app.graph_add.tools.add_file ..\..\notes\auth.md --project-id <uuid> --choose 1 --placement direct
+
+# create a folder at the chosen point; a name clash is resolved by the API's suggestion
+..\.venv\Scripts\python.exe -m app.graph_add.tools.add_file ..\..\notes\auth.md --project-id <uuid> --choose 1 --placement new_directory --new-directory-name authentication --auto-rename
+```
+
+Options: `--url`, `--project-id`, `--choose`, `--directory-id`, `--root`, `--placement`,
+`--new-directory-name`, `--file-name`, `--auto-rename`, `--token`, `--user`, `--timeout`,
+`--show-tree`, `--depth`, `--dry-run`, `--json`, `--full`.
+
+Any selection flag makes the run unattended — it never blocks on input. Exit codes: `0`
+placed, `1` error, `2` name conflict (alternatives are printed), `3` the suggestion expired,
+`130` nothing was written because the question was left unanswered. `--show-tree` prints the
+project afterwards using Graph Creation's read route.
 
 ## Try it locally (upload a directory)
 
@@ -168,7 +257,17 @@ app/
 │  ├─ storage.py      # Supabase Storage, content-addressed keys
 │  ├─ repository.py   # PostgREST access (protocol + Supabase implementation)
 │  └─ tests/
-├─ graph_add/         # SECTION — empty scaffold, design TBD
+├─ graph_add/         # SECTION — implemented
+│  ├─ router.py       # HTTP surface (suggest → place)
+│  ├─ service.py      # orchestration, conflicts, ancestor refresh
+│  ├─ navigate.py     # bounded semantic walk + ranking contract
+│  ├─ llm.py          # Gemini + mock navigators
+│  ├─ prompts.py      # navigation / ranking / folder-description prompts
+│  ├─ labels.py       # folder + file naming, ltree labels, rename suggestions
+│  ├─ extract.py      # markdown → prompt text
+│  ├─ storage.py      # content-addressed blob upload
+│  ├─ repository.py   # PostgREST access (add_requests + tree writes)
+│  └─ tests/
 └─ graph_ai_search/   # SECTION — empty scaffold, design TBD
 ```
 
