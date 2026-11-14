@@ -44,6 +44,16 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _failure_message(failed: int, detail: str | None) -> str | None:
+    """One-line reason stored on a partial job so the cause is visible."""
+    if not failed:
+        return None
+    message = f"{failed} item(s) failed"
+    if detail:
+        message += f"; first: {detail[:300]}"
+    return message
+
+
 @dataclass
 class FileSummary:
     """What was stored for one file."""
@@ -51,6 +61,7 @@ class FileSummary:
     summary: str
     status: str  # ok | skipped | failed
     model: str | None
+    detail: str | None = None
 
 
 @dataclass
@@ -133,7 +144,8 @@ class GraphCreationService:
         job_id = prepared.job["id"]
         try:
             await self._repository.update_job(job_id, {"status": "summarising"})
-            summaries, descriptions, failed = await self._summarise_tree(prepared)
+            summaries, descriptions, failed, first_failure = await self._summarise_tree(prepared)
+            error = _failure_message(failed, first_failure)
 
             await self._repository.update_job(job_id, {"status": "persisting"})
             await self._persist(prepared, summaries, descriptions)
@@ -144,6 +156,7 @@ class GraphCreationService:
                     "status": "partial" if failed else "ok",
                     "processed_files": prepared.tree.total_files,
                     "failed_files": failed,
+                    "error": error,
                     "finished_at": _now(),
                 },
             )
@@ -161,7 +174,7 @@ class GraphCreationService:
 
     async def _summarise_tree(
         self, prepared: PreparedUpload
-    ) -> tuple[dict[str, FileSummary], dict[str, str], int]:
+    ) -> tuple[dict[str, FileSummary], dict[str, str], int, str | None]:
         """Summarise files, then each directory from its children (post-order)."""
         tree = prepared.tree
         job_id = prepared.job["id"]
@@ -170,6 +183,7 @@ class GraphCreationService:
         summaries: dict[str, FileSummary] = {}
         descriptions: dict[str, str] = {}
         failed = 0
+        first_failure: str | None = None
         processed = 0
         reported = 0
 
@@ -182,6 +196,7 @@ class GraphCreationService:
                 summaries[path] = summary
                 if summary.status != "ok":
                     failed += 1
+                    first_failure = first_failure or summary.detail
             processed += len(node.files)
 
             file_pairs = [(entry.name, summaries[entry.path].summary) for entry in node.files]
@@ -197,12 +212,13 @@ class GraphCreationService:
                 logger.warning("Could not describe %r: %s", node.path or "<root>", exc)
                 descriptions[node.path] = "Description unavailable."
                 failed += 1
+                first_failure = first_failure or f"{type(exc).__name__}: {exc}"
 
             if processed - reported >= _PROGRESS_EVERY or processed == tree.total_files:
                 reported = processed
                 await self._repository.update_job(job_id, {"processed_files": processed})
 
-        return summaries, descriptions, failed
+        return summaries, descriptions, failed, first_failure
 
     async def _summarise_file(self, entry: FileEntry, cache: dict[str, FileSummary]) -> FileSummary:
         digest = content_hash(entry.data)
@@ -227,7 +243,12 @@ class GraphCreationService:
                 result = FileSummary(summary=text, status="ok", model=self._summarizer.model_name)
             except Exception as exc:  # noqa: BLE001 - recorded on the file row
                 logger.warning("Could not summarise %r: %s", entry.path, exc)
-                result = FileSummary(summary="Summary unavailable.", status="failed", model=None)
+                result = FileSummary(
+                    summary="Summary unavailable.",
+                    status="failed",
+                    model=None,
+                    detail=f"{type(exc).__name__}: {exc}",
+                )
 
         cache[digest] = result
         return result

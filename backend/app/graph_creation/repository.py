@@ -29,12 +29,21 @@ class SupabaseRequestError(HTTPException):
 def _describe_api_error(exc: APIError) -> str:
     """Turn a PostgREST error into something that says what to fix."""
     message = str(getattr(exc, "message", None) or exc)
-    if getattr(exc, "code", None) == "42501":
+    code = getattr(exc, "code", None)
+    if code == "42501":
         message += (
             " - the request ran without service-role privileges; check that"
             " SUPABASE_SERVICE_ROLE_KEY holds the secret key (sb_secret_...) and not"
             " the publishable key, then restart the API"
         )
+    elif code == "23503":
+        message += (
+            " - a referenced row is missing; in AUTH_MODE=dev the owner id must be a"
+            " real Supabase user, so set DEV_USER_ID to that user's UUID"
+            " (Authentication -> Users) and restart the API"
+        )
+    elif code == "23505":
+        message += " - that path or name already exists in this project"
     if getattr(exc, "hint", None):
         message += f" (hint: {exc.hint})"
     return f"Supabase rejected the request: {message}"

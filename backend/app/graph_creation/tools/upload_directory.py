@@ -36,7 +36,6 @@ from app.graph_creation.tree import (
 )
 
 API_PREFIX = "/api/graph-creation"
-DEFAULT_USER = "00000000-0000-0000-0000-000000000001"
 FINISHED = {"ok", "partial", "failed"}
 SKIP_DIRECTORIES = {
     ".git",
@@ -169,7 +168,9 @@ async def upload_and_print(args: argparse.Namespace, entries: list[tuple[str, by
     """Upload the directory, follow the job, then print the stored tree."""
     base = args.url.rstrip("/")
     headers = (
-        {"Authorization": f"Bearer {args.token}"} if args.token else {"X-Dev-User-Id": args.user}
+        {"Authorization": f"Bearer {args.token}"}
+        if args.token
+        else {"X-Dev-User-Id": args.user or get_settings().dev_user_id}
     )
     form: dict[str, str] = {"mode": args.mode}
     if args.name:
@@ -297,8 +298,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--token", help="Supabase access token; omit to use the dev header")
     parser.add_argument(
         "--user",
-        default=DEFAULT_USER,
-        help="X-Dev-User-Id value when the API runs with AUTH_MODE=dev",
+        default=None,
+        help="X-Dev-User-Id value (default: DEV_USER_ID from backend/.env)",
     )
     parser.add_argument("--depth", type=int, help="limit the printed tree depth")
     parser.add_argument("--timeout", type=float, default=300.0, help="seconds to wait for the job")
