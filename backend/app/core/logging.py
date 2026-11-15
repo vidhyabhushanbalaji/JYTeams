@@ -23,8 +23,9 @@ def configure_logging(level: str = "INFO") -> None:
     root.addHandler(handler)
     root.setLevel(level.upper())
 
-    # Third-party libraries are chatty at INFO.
-    for noisy in ("neo4j", "httpx", "httpcore"):
+    # Third-party libraries are chatty at INFO: httpx logs every request, google-genai logs
+    # its (unused) automatic function calling on every call, and both drown out our own lines.
+    for noisy in ("neo4j", "httpx", "httpx2", "httpcore", "google_genai"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     _configured = True

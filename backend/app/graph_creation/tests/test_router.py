@@ -137,3 +137,41 @@ def test_tree_and_directory_responses_are_serialised(
     job = api.get(f"/api/graph-creation/jobs/{created['job_id']}").json()
     assert job["status"] == "ok"
     assert job["processed_files"] == 2
+
+
+def test_a_document_can_be_read_and_saved(api: TestClient, service: _SyncService) -> None:
+    created = api.post(
+        "/api/graph-creation/uploads",
+        data={"mode": "new", "name": "Docs"},
+        files=[("files", ("README.md", b"# Root", "text/markdown"))],
+    ).json()
+    prepared = service.scheduled
+    assert prepared is not None
+    asyncio.run(service.run_job(prepared))
+
+    tree = api.get(f"/api/graph-creation/projects/{created['project_id']}/tree").json()
+    file_id = tree["tree"]["files"][0]["id"]
+
+    read = api.get(f"/api/graph-creation/files/{file_id}/content")
+    assert read.status_code == 200
+    body = read.json()
+    assert body["text"] == "# Root"
+    assert body["editable"] is True
+
+    saved = api.put(
+        f"/api/graph-creation/files/{file_id}/content",
+        json={"text": "# Root\n\nEdited.", "expected_sha256": body["content_sha256"]},
+    )
+    assert saved.status_code == 200
+    assert saved.json()["size_bytes"] == len("# Root\n\nEdited.")
+
+    again = api.get(f"/api/graph-creation/files/{file_id}/content").json()
+    assert again["text"] == "# Root\n\nEdited."
+    assert again["content_sha256"] == saved.json()["content_sha256"]
+
+
+def test_unknown_document_ids_are_not_found(api: TestClient) -> None:
+    assert api.get("/api/graph-creation/files/missing/content").status_code == 404
+    assert (
+        api.put("/api/graph-creation/files/missing/content", json={"text": "x"}).status_code == 404
+    )

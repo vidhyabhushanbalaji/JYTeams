@@ -2,7 +2,7 @@
 
 import { contextBridge, ipcRenderer } from 'electron'
 
-import type { AppConfig, JyTeamsApi, PlacementInput, XYPosition } from '../shared/types'
+import type { AppConfig, FileContentInput, JyTeamsApi, PlacementInput, XYPosition } from '../shared/types'
 
 const api: JyTeamsApi = {
   config: {
@@ -24,6 +24,10 @@ const api: JyTeamsApi = {
     save: (projectId: string, positions: Record<string, XYPosition>) =>
       ipcRenderer.invoke('layout:save', projectId, positions),
     clear: (projectId: string) => ipcRenderer.invoke('layout:clear', projectId)
+  },
+  files: {
+    read: (fileId: string) => ipcRenderer.invoke('files:read', fileId),
+    save: (input: FileContentInput) => ipcRenderer.invoke('files:save', input)
   },
   create: {
     pickFolder: () => ipcRenderer.invoke('create:pick-folder'),

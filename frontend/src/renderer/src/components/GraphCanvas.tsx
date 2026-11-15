@@ -46,6 +46,8 @@ export interface GraphCanvasProps {
   dimmed: boolean
   onSelect: (nodeId: string | null) => void
   onOpen: (refId: string) => void
+  /** Double-clicking a file card opens its markdown in the document sheet. */
+  onOpenFile: (refId: string) => void
   onMove: (nodeId: string, position: XYPosition) => void
 }
 
@@ -69,6 +71,7 @@ function Canvas({
   dimmed,
   onSelect,
   onOpen,
+  onOpenFile,
   onMove
 }: GraphCanvasProps) {
   const { fitView } = useReactFlow()
@@ -76,8 +79,8 @@ function Canvas({
 
   // Pressing a card is one gesture with two meanings: select, then open. Reading the live
   // props through a ref keeps the callback stable, so cards never hold a stale closure.
-  const live = useRef({ model, selectedId, onOpen, onSelect })
-  live.current = { model, selectedId, onOpen, onSelect }
+  const live = useRef({ model, selectedId, onOpen, onSelect, onOpenFile })
+  live.current = { model, selectedId, onOpen, onSelect, onOpenFile }
 
   const activate = useCallback((refId: string) => {
     const current = live.current
@@ -88,6 +91,13 @@ function Canvas({
       return
     }
     current.onSelect(node.id)
+  }, [])
+
+  // A double-click is only meaningful on a document; folders already open on the second press.
+  const openDocument = useCallback((refId: string) => {
+    const current = live.current
+    const node = current.model.nodes.find((entry) => entry.refId === refId)
+    if (node?.kind === 'file') current.onOpenFile(node.refId)
   }, [])
 
   const builtFor = useRef('')
@@ -188,6 +198,7 @@ function Canvas({
       edgeTypes={edgeTypes}
       onNodesChange={handleNodesChange}
       onNodeClick={(_event, node) => activate(node.data.node.refId)}
+      onNodeDoubleClick={(_event, node) => openDocument(node.data.node.refId)}
       onNodeDragStart={handleDragStart}
       onNodeDragStop={handleDragStop}
       onPaneClick={() => onSelect(null)}

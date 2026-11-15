@@ -1,7 +1,7 @@
 # JYTeams backend
 
 FastAPI service for the JYTeams desktop app. Python 3.14, **Supabase** for auth, Postgres
-(the project tree) and file storage, and **Gemini** (`gemini-2.5-flash-lite`) for folder
+(the project tree) and file storage, and **Gemini** (`gemini-3.1-flash-lite`) for folder
 descriptions.
 
 ## Setup
@@ -74,6 +74,8 @@ All are mounted under `/api/graph-creation` and require an identity (bearer toke
 | `GET` | `/projects/{project_id}` | One project (name + whole-project description) |
 | `GET` | `/projects/{project_id}/tree?depth=N` | Nested tree with descriptions for every folder |
 | `GET` | `/directories/{directory_id}` | One directory + its immediate children |
+| `GET` | `/files/{file_id}/content` | One document's markdown: `{id, name, path, size_bytes, content_sha256, text, editable, truncated}` |
+| `PUT` | `/files/{file_id}/content` | Save a new body (`{text, expected_sha256?}`); no model is called |
 
 `POST /uploads` form fields:
 
@@ -98,6 +100,33 @@ curl.exe -X POST http://localhost:8000/api/graph-creation/uploads `
 
 curl.exe http://localhost:8000/api/graph-creation/jobs/<job_id>
 ```
+
+### Reading and editing a document
+
+`GET /files/{file_id}/content` returns the stored markdown as text. The desktop app opens it on
+a double-click and offers **Edit**, so `PUT /files/{file_id}/content` takes a whole replacement
+body:
+
+```powershell
+curl.exe http://localhost:8000/api/graph-creation/files/<file_id>/content
+
+curl.exe -X PUT http://localhost:8000/api/graph-creation/files/<file_id>/content `
+  -H "Content-Type: application/json" `
+  -d "{\"text\":\"# Title`n`nNew body.\",\"expected_sha256\":\"<the digest you read>\"}"
+```
+
+- **Blobs are content-addressed and shared**, so a save never rewrites the old object: the new
+  text is stored under its own digest and the `files` row is repointed (`size_bytes`,
+  `content_sha256`, `storage_path`). A document that shares the old bytes is untouched, and the
+  previous object is left in place (like a re-upload, it is simply no longer referenced).
+- `expected_sha256` is optional but recommended: when it no longer matches, the save answers
+  **409** instead of overwriting a newer edit — that is how two windows cannot clobber each
+  other.
+- Bodies over `MAX_FILE_BYTES` answer **413**. Non-markdown rows, and documents longer than
+  `FILE_EDIT_MAX_CHARS`, come back `editable: false` (the long ones also `truncated: true`).
+- **No model call happens.** Folder descriptions stay as they were until the next add or
+  placement; search reads document text by digest, so an edited document is found by its new
+  words immediately.
 
 ## Graph Add endpoints
 
@@ -326,7 +355,7 @@ failed, `2` the name is taken.
 > A `429` means the model's quota is spent or it is briefly throttled. The Gemini describer
 > retries an overload on the same model and, if `GEMINI_FALLBACK_MODELS` is configured, moves on
 > to the next model. The chain is **empty by default**, so every description comes from
-> `GEMINI_MODEL` (`gemini-2.5-flash-lite`) and a failure surfaces instead of another model
+> `GEMINI_MODEL` (`gemini-3.1-flash-lite`) and a failure surfaces instead of another model
 > quietly writing the text. `description_model` on each folder row names the model that actually
 > produced its text.
 
@@ -358,7 +387,7 @@ bearer token; otherwise the `X-Dev-User-Id` header is sent), `--depth`, `--timeo
 `--interval`, `--json`, `--full`.
 
 `--dry-run` uses the offline mock describer; a live run uses the Gemini describer
-(`GEMINI_MODEL`, `gemini-2.5-flash-lite`) unless `SUMMARIZER=mock` or no `GEMINI_API_KEY` is
+(`GEMINI_MODEL`, `gemini-3.1-flash-lite`) unless `SUMMARIZER=mock` or no `GEMINI_API_KEY` is
 configured, in which case it is the mock too.
 Either way the tree structure - empty-directory pruning, natural ordering, `ltree` paths - is
 identical to what the API stores.
@@ -381,7 +410,7 @@ identical to what the API stores.
    jumping in tens of files. Every description is capped at `DESCRIPTION_MAX_CHARS` (300): the
    prompt asks for that length and the reply is clipped to it, at a word boundary. Model calls
    start at least `LLM_MIN_INTERVAL_SECONDS` (2 s) apart, including retries and fallback models.
-   Gemini (`gemini-2.5-flash-lite`) is the only provider; with no `GEMINI_API_KEY` (or
+   Gemini (`gemini-3.1-flash-lite`) is the only provider; with no `GEMINI_API_KEY` (or
    `SUMMARIZER=mock`) a deterministic offline mock writes the descriptions, so the pipeline
    runs (and tests pass) with no key and no network.
 4. **Persist** (`repository.py`, `storage.py`) — blobs go to Storage under
@@ -464,9 +493,10 @@ All settings and defaults live in `app/core/config.py`; env var names are in
 | `AUTH_MODE`, `DEV_USER_ID` | `dev` trusts `X-Dev-User-Id`; `supabase` verifies the bearer token |
 | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` | Service role bypasses RLS — server-side only |
 | `STORAGE_BUCKET` | Bucket for uploaded markdown (default `project-files`) |
-| `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_THINKING_BUDGET`, `GEMINI_FALLBACK_MODELS` | The only describer provider (`google-genai`). Default model `gemini-2.5-flash-lite`. Fallbacks are empty by default, so every description comes from that model. `GEMINI_THINKING_BUDGET=0` (or blank) sends no thinking config, which is what 2.5 Flash-Lite wants |
+| `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_THINKING_LEVEL`, `GEMINI_FALLBACK_MODELS` | The only describer provider (`google-genai`). Default model `gemini-3.1-flash-lite`; 2.5 models are access-gated and answer `404 model not found` for newer projects. Fallbacks are empty by default, so every description comes from that model. `GEMINI_THINKING_LEVEL` is `minimal` / `low` / `medium` / `high`; blank (the default) sends no thinking config at all, which is cheapest. There is no numeric thinking budget: models from 3.5 onwards reject it |
 | `SUMMARIZER`, `SUMMARY_MAX_INPUT_CHARS`, `SUMMARY_CONCURRENCY` | `gemini` / `mock`; the offline mock is used when no key is configured (and by the tests); the character cap when a document is read for a prompt; how many folder descriptions run at once (4 by default) |
 | `DESCRIPTION_FILE_HEAD_CHARS`, `DESCRIPTION_MAX_INPUT_CHARS`, `DESCRIPTION_MAX_CHARS` | How much of each file (1500) and of one folder (24000) reaches a description prompt, and the hard ceiling (300 characters) for the description that comes back |
+| `FILE_EDIT_MAX_CHARS` | Characters of one document the app loads for editing (400 000). Longer documents open truncated and read-only; a save is still capped by `MAX_FILE_BYTES` |
 | `LLM_MIN_INTERVAL_SECONDS` | Minimum gap between the starts of model calls (2 s). Retries and fallback models are paced too |
 | `SCORING_FOLDER_THRESHOLD` | Share of a query a folder description must cover before a **search** opens that branch (0.25) |
 | `SEARCH_MAX_FILES_READ`, `SEARCH_MAX_DOCUMENT_CHARS`, `BLOB_CACHE_ENTRIES` | Search's read budget (200 documents), per-document cap (200k characters) and digest cache size (256) |
@@ -476,8 +506,13 @@ All settings and defaults live in `app/core/config.py`; env var names are in
 
 - **Background jobs are in-process `asyncio` tasks.** Run a single uvicorn worker; a hard
   crash mid-job leaves that job row unfinished (no partial tree is ever written, because
-  every description is produced before anything is inserted). A real queue is the next step
-  if we need durability.
+  every description is produced before anything is inserted). A real job queue is the next
+  step if we need durability.
+- **Blob writes are retried twice** on a transient transport error, because a dropped socket
+  must not discard a job whose descriptions are already paid for (Windows raises
+  `WinError 10035` under concurrent uploads). For the same reason the shared Supabase client
+  runs over **HTTP/1.1**: storage3 builds its own client with `http2=True`, and httpcore's
+  sync HTTP/2 read is the call that fails. Uploads still run 4 at a time.
 - **The service-role client bypasses RLS,** so ownership is enforced in
   `GraphCreationService` (`_require_project`, `get_job`). The RLS policies in the
   migration protect direct access from the Electron app with a user JWT.

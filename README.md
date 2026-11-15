@@ -4,7 +4,7 @@ An Electron desktop app that makes Microsoft Teams **project information easier 
 reach**. By Charlie and Bhushan.
 
 Stack: Electron (frontend, later) · Python 3.14 + FastAPI (backend) · Supabase (auth,
-Postgres tree, file storage) · Gemini `gemini-2.5-flash-lite` (folder descriptions only, the
+Postgres tree, file storage) · Gemini `gemini-3.1-flash-lite` (folder descriptions only, the
 only model provider). Neo4j was retired — the project tree is a hierarchy, and `ltree` in
 Postgres covers it.
 
@@ -14,8 +14,9 @@ Postgres covers it.
 implemented**: upload a directory of markdown files and you get a described tree (one
 description per folder, produced bottom-up; documents are stored, never summarised); add a
 single document and the service scores every folder locally to suggest where it belongs, then
-places it in the folder you choose; and search a project for the document that answers a
-question, matching locally against folder descriptions and document text. Details for each:
+places it in the folder you choose; search a project for the document that answers a
+question, matching locally against folder descriptions and document text; and double-click a
+document to read its markdown in the app and save an edit back. Details for each:
 [`backend/README.md`](backend/README.md).
 
 | Section | Directory | HTTP prefix | State |

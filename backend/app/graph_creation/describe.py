@@ -7,7 +7,7 @@ directory instead of one per file plus one per directory.
 
 Two implementations exist - ``GeminiDescriber`` (real, through ``google-genai``) and
 ``MockDescriber`` (deterministic, no network) - selected by ``SUMMARIZER`` and the configured
-API key. Gemini is the only provider: ``GEMINI_MODEL`` (``gemini-2.5-flash-lite``) writes every
+API key. Gemini is the only provider: ``GEMINI_MODEL`` (``gemini-3.1-flash-lite``) writes every
 description.
 
 Because a description is now the only thing a local search can match a folder on, the prompt asks
@@ -18,7 +18,7 @@ Three provider quirks are handled here, because each of them used to surface as 
 description failed" instead of a readable error:
 
 * a thinking config the model rejects is retried once without it and remembered per model
-  (``GEMINI_THINKING_BUDGET=0`` already sends none, which is what 2.5 Flash-Lite wants);
+  (blank ``GEMINI_THINKING_LEVEL`` already sends none, which is the cheapest option);
 * a ``429`` quota error cannot be fixed by retrying the same model seconds later, while a
   ``503`` overload can - only an overload is retried on the same model;
 * thinking tokens are billed against ``max_output_tokens``, so the output budget must be
@@ -41,7 +41,9 @@ logger = logging.getLogger(__name__)
 
 _MAX_ATTEMPTS = 3
 _REQUEST_TIMEOUT_MS = 30_000
-_DEFAULT_MAX_OUTPUT_TOKENS = 1024
+#: Thinking tokens are billed against the output budget, so leave room for a description even
+#: when a thinking level is configured. The text itself is clipped to DESCRIPTION_MAX_CHARS.
+_DEFAULT_MAX_OUTPUT_TOKENS = 2048
 #: No fallback by default: every description is written by the configured model. Set
 #: GEMINI_FALLBACK_MODELS to opt into another model when the primary one is unavailable.
 _FALLBACK_MODELS: tuple[str, ...] = ()
@@ -208,7 +210,7 @@ class GeminiDescriber:
         api_key: str,
         model: str,
         max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
-        thinking_budget: int | None = 0,
+        thinking_level: str = "",
         fallback_models: Sequence[str] | None = None,
         max_chars: int = 300,
         min_interval_seconds: float = 0.0,
@@ -227,16 +229,16 @@ class GeminiDescriber:
         self._client = client
         self.model_name = model
         self._max_output_tokens = max_output_tokens
-        self._thinking_budget = thinking_budget
+        self._thinking_level = (thinking_level or "").strip().lower()
         self._max_chars = max_chars
         self._pacer = RequestPacer(min_interval_seconds)
-        # Models that rejected a thinking config (the *-flash-lite family does).
+        # Models that rejected a thinking config (older lite models do for some levels).
         self._thinking_supported: dict[str, bool] = {}
         self._fallback_models = tuple(fallback_models) if fallback_models else _FALLBACK_MODELS
 
     def _wants_thinking(self, model: str) -> bool:
-        """Thinking is opt-in: only a positive budget is sent, and only if accepted."""
-        if self._thinking_budget is None or self._thinking_budget <= 0:
+        """Thinking is opt-in: only a configured level is sent, and only if accepted."""
+        if not self._thinking_level:
             return False
         return self._thinking_supported.get(model, True)
 
@@ -247,9 +249,12 @@ class GeminiDescriber:
         options: dict[str, object] = {
             "temperature": 0,
             "max_output_tokens": self._max_output_tokens,
+            # Nothing here calls a function, so the SDK's automatic function calling can only
+            # add latency and log noise.
+            "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
         }
-        if include_thinking and self._thinking_budget is not None:
-            options["thinking_config"] = types.ThinkingConfig(thinking_budget=self._thinking_budget)
+        if include_thinking and self._thinking_level:
+            options["thinking_config"] = types.ThinkingConfig(thinking_level=self._thinking_level)
         return types.GenerateContentConfig(**options)
 
     def _models(self) -> tuple[str, ...]:
@@ -287,7 +292,7 @@ class GeminiDescriber:
                     if kind == "fatal":
                         raise
                     if kind == "invalid" and include_thinking:
-                        # e.g. gemini-3.5-flash-lite rejects thinking_budget=0 outright.
+                        # e.g. a model that does not support the configured thinking level.
                         logger.info(
                             "Model %s rejected the thinking config (%s); retrying without it",
                             model,
@@ -357,7 +362,7 @@ def build_describer(settings: Settings) -> Describer:
         return GeminiDescriber(
             api_key=settings.gemini_api_key,
             model=settings.gemini_model,
-            thinking_budget=settings.gemini_thinking_budget,
+            thinking_level=settings.gemini_thinking_level,
             fallback_models=settings.gemini_models[1:],
             max_chars=settings.description_max_chars,
             min_interval_seconds=settings.llm_min_interval_seconds,

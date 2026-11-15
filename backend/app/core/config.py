@@ -63,13 +63,15 @@ class Settings(BaseSettings):
     # Gemini (google-genai) is the only model provider: folder descriptions are the only thing
     # it writes (Graph Creation, and the refresh after a placement).
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash-lite"
+    gemini_model: str = "gemini-3.1-flash-lite"
     #: Comma separated models tried, in order, only when the primary one is unavailable.
     #: Empty by default, so every description is written by ``gemini_model``.
     gemini_fallback_models: str = ""
-    # Positive values cap thinking (faster, cheaper descriptions). 0, blank or negative omits
-    # the thinking config entirely, which is what Gemini 2.5 Flash-Lite wants.
-    gemini_thinking_budget: int | None = 0
+    # How much the model may think before answering: "minimal", "low", "medium", "high", or
+    # blank. Blank (the default) sends no thinking config at all, which is the cheapest and
+    # fastest option for a short folder description. ``thinking_level`` replaces the old
+    # numeric thinking budget, which models from 3.5 onwards reject outright.
+    gemini_thinking_level: Literal["", "minimal", "low", "medium", "high"] = ""
 
     # Describers. Gemini when a key is configured, otherwise the offline mock (tests and
     # keyless local runs). There is no second provider.
@@ -87,6 +89,10 @@ class Settings(BaseSettings):
     description_max_input_chars: int = 24_000
     #: Hard ceiling for one folder description, in characters. The prompt asks for this too.
     description_max_chars: int = Field(default=300, ge=120, le=2_000)
+    #: Characters of one document the viewer will load for editing. Longer documents are shown
+    #: truncated and read-only: a 20 MB textarea is not usable, and MAX_FILE_BYTES still caps a
+    #: save.
+    file_edit_max_chars: int = Field(default=400_000, ge=1_000)
 
     # Local (model-free) matching, shared by Graph AI Search and Graph Add suggestions. The
     # folder threshold is the share of the query a folder description must cover before the
@@ -113,6 +119,14 @@ class Settings(BaseSettings):
             if raw.startswith("["):
                 return json.loads(raw)
             return [origin.strip() for origin in raw.split(",") if origin.strip()]
+        return value
+
+    @field_validator("gemini_thinking_level", mode="before")
+    @classmethod
+    def _normalise_thinking_level(cls, value: object) -> object:
+        """Accept ``HIGH`` as well as ``high``; blank means "send no thinking config"."""
+        if isinstance(value, str):
+            return value.strip().lower()
         return value
 
     @property

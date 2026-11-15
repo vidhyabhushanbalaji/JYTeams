@@ -11,7 +11,7 @@ An Electron desktop app that makes Microsoft Teams project information easier to
 | Backend | Python 3.14 + FastAPI — `backend/` |
 | Auth | Supabase Auth (bearer token); `AUTH_MODE=dev` trusts `X-Dev-User-Id` locally |
 | Data | Supabase **Postgres** (the tree, via `ltree`) + Supabase **Storage** (markdown files) |
-| LLM | Gemini `gemini-2.5-flash-lite` (`google-genai`) — **directory descriptions only** (creation, and the refresh after a placement). It is the **only** provider (Groq was retired); `GEMINI_FALLBACK_MODELS` is empty, so every description comes from that model. `SUMMARIZER=mock` gives the offline describer. Search and placement ranking are local (`app/core/text.py`) and make no model call |
+| LLM | Gemini `gemini-3.1-flash-lite` (`google-genai`) — **directory descriptions only** (creation, and the refresh after a placement). It is the **only** provider (Groq was retired); `GEMINI_FALLBACK_MODELS` is empty, so every description comes from that model. `SUMMARIZER=mock` gives the offline describer. Search and placement ranking are local (`app/core/text.py`) and make no model call |
 | Graph DB | **None.** Neo4j was retired; Graph AI Search walks the `ltree` hierarchy instead |
 
 ## Layout
@@ -46,7 +46,10 @@ bottom-up: each folder's description is written from the **text** of the files d
 inside it plus its child folder descriptions — so the root describes the whole project and
 the import costs one model call per folder, not one per file. Documents are never summarised
 (`summary_status='skipped'`). Rows land in `projects` / `directories` / `files`, progress in
-`creation_jobs`, and the blobs in a content-addressed Storage bucket.
+`creation_jobs`, and the blobs in a content-addressed Storage bucket. Two further endpoints
+read and save a document's own markdown (`GET`/`PUT /files/{id}/content`); a save writes a new
+content-addressed object and repoints the row, makes **no model call**, and takes an optional
+`expected_sha256` so a stale window gets a 409 instead of overwriting a newer edit.
 
 ## Graph Add, in one paragraph
 
@@ -110,7 +113,7 @@ API docs: <http://localhost:8000/docs> · health: <http://localhost:8000/health>
   `LLM_MIN_INTERVAL_SECONDS` (2 s) apart — retries and fallback models included.
 - Schema changes are SQL in `supabase/migrations/`, reviewed by both of us before they
   are applied to a shared project.
-- **Gemini is the only model provider** (`gemini-2.5-flash-lite`), and anything that can reach
+- **Gemini is the only model provider** (`gemini-3.1-flash-lite`), and anything that can reach
   the model for real is capped at **5 requests per AI-run task** — read
   `.clinerules/20-ai-usage-limits.md` before running a live check. Users of the app are not
   limited (for now).

@@ -63,7 +63,7 @@ export function SearchResults({
   const flags = searchFlags(traversal)
 
   return (
-    <>
+    <div className="side__scroll">
       <p className="search__meta">
         {results.results.length} {results.results.length === 1 ? 'answer' : 'answers'} for{' '}
         {`"${results.query}"`}
@@ -73,12 +73,10 @@ export function SearchResults({
       </p>
       <div className="hits">
         {results.results.length === 0 ? (
-          <div className="side__body">
-            <p className="side__empty">
-              Nothing answered that. The search matches the words in each document and its folder
-              descriptions, so try a term the documentation itself would use.
-            </p>
-          </div>
+          <p className="side__empty side__pad">
+            Nothing answered that. The search matches the words in each document and its folder
+            descriptions, so try a term the documentation itself would use.
+          </p>
         ) : null}
         {results.results.map((hit) => (
           <button key={hit.file_id} type="button" className="hit" onClick={() => onOpenHit(hit)}>
@@ -100,6 +98,6 @@ export function SearchResults({
           </button>
         ))}
       </div>
-    </>
+    </div>
   )
 }

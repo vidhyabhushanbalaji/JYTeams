@@ -20,6 +20,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 
 from fastapi import HTTPException, status
 
@@ -44,6 +45,9 @@ logger = logging.getLogger(__name__)
 
 _PROGRESS_MIN_INTERVAL = 1.0
 _STORAGE_CONCURRENCY = 4
+#: Extensions the viewer offers to edit. Everything else is read-only, because an upload is
+#: markdown and nothing else.
+_EDITABLE_SUFFIXES = frozenset({".md", ".markdown", ".mdx"})
 _BACKGROUND_TASKS: set[asyncio.Task] = set()
 
 
@@ -540,6 +544,94 @@ class GraphCreationService:
             ),
         }
 
+    # --------------------------------------------------------------- documents
+
+    async def get_file_content(self, file_id: str, owner_id: str) -> Row:
+        """One document's stored markdown, plus whether the viewer may edit it here."""
+        row = await self._require_file(file_id, owner_id)
+        bucket = str(row.get("storage_bucket") or self._store.bucket)
+        path = str(row.get("storage_path") or "")
+        if not path:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="This document has no stored file to read.",
+            )
+        try:
+            data = await self._store.get(bucket=bucket, path=path)
+        except Exception as exc:  # noqa: BLE001 - one clear error instead of a stack trace
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Could not read this document from storage: {exc}",
+            ) from exc
+
+        text = data.decode("utf-8-sig", errors="replace")
+        limit = self._settings.file_edit_max_chars
+        truncated = len(text) > limit
+        return {
+            "id": row["id"],
+            "name": str(row.get("name", "")),
+            "path": str(row.get("path", "")),
+            "size_bytes": int(row.get("size_bytes") or len(data)),
+            "content_sha256": str(row.get("content_sha256") or content_hash(data)),
+            "text": text[:limit] if truncated else text,
+            "editable": self._is_editable(row) and not truncated,
+            "truncated": truncated,
+        }
+
+    async def save_file_content(
+        self,
+        file_id: str,
+        owner_id: str,
+        *,
+        text: str,
+        expected_sha256: str | None = None,
+    ) -> Row:
+        """Store a new body under its own digest and repoint the row.
+
+        Blobs are content-addressed and may be shared, so the old object is never overwritten —
+        editing one path cannot corrupt another document that happens to hold the same bytes.
+        No model is called: the folder descriptions refresh on the next add or placement.
+        """
+        row = await self._require_file(file_id, owner_id)
+        if expected_sha256 and expected_sha256 != row.get("content_sha256"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This document changed since you opened it. Close it and open it again.",
+            )
+        if not self._is_editable(row):
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail="Only markdown documents can be edited here.",
+            )
+
+        data = text.encode("utf-8")
+        if len(data) > self._settings.max_file_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail=(
+                    f"This document is {len(data)} bytes; the limit is "
+                    f"{self._settings.max_file_bytes}."
+                ),
+            )
+
+        digest = content_hash(data)
+        stored = await self._store.put(
+            project_id=str(row["project_id"]),
+            digest=digest,
+            filename=str(row.get("name", "")),
+            data=data,
+        )
+        updated = await self._repository.update_file(
+            file_id,
+            {
+                "size_bytes": len(data),
+                "content_sha256": digest,
+                "storage_bucket": stored.bucket,
+                "storage_path": stored.path,
+            },
+        )
+        return {**self._file_out(updated), "content_sha256": digest}
+
     # ----------------------------------------------------------------- helpers
 
     async def _require_project(self, project_id: str, owner_id: str) -> Row:
@@ -547,6 +639,19 @@ class GraphCreationService:
         if project is None or project.get("owner_id") != owner_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
         return project
+
+    async def _require_file(self, file_id: str, owner_id: str) -> Row:
+        """One file row, with its project's ownership checked (404 for either miss)."""
+        row = await self._repository.get_file(file_id)
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+        await self._require_project(str(row["project_id"]), owner_id)
+        return row
+
+    @staticmethod
+    def _is_editable(row: Row) -> bool:
+        suffix = PurePosixPath(str(row.get("name") or "")).suffix.lower()
+        return suffix in _EDITABLE_SUFFIXES
 
     async def _assert_no_path_conflicts(self, project_id: str, tree: DirectoryNode) -> None:
         existing = await self._repository.list_files(project_id)

@@ -742,6 +742,7 @@ button.chip:hover {
 
 .workspace__side {
   display: flex;
+  overflow: hidden;
   min-height: 0;
   flex-direction: column;
   border-left: 1px solid var(--line);
@@ -765,8 +766,34 @@ button.chip:hover {
 .side__body {
   display: flex;
   overflow: auto;
+  flex: 1;
+  min-height: 0;
   flex-direction: column;
   gap: 16px;
+  padding: 16px;
+}
+
+/*
+ * Search results are full-bleed rows - each carries its own padding and hairline - so they
+ * need a scroll region without the body's padding. `flex: 1` bounds it under the panel head,
+ * and the meta line stays put while the hits move.
+ */
+.side__scroll {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.side__scroll > .search__meta {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+/* Copy that is not a full-bleed row still gets the panel's usual gutter. */
+.side__pad {
   padding: 16px;
 }
 
@@ -1514,4 +1541,323 @@ button.crumb:hover:not(:disabled) {
 .node__open--ready {
   color: var(--ink);
   font-weight: 600;
+}
+
+/* ----------------------------------------------------------- document sheet */
+
+/*
+ * The reader/editor sits over the canvas only, so the folder you came from stays visible
+ * beside it. It borrows the dialog's paper, hairline and shadow rather than inventing new
+ * surfaces, and slides in from the right because that is where it is anchored.
+ */
+
+.sheet {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+}
+
+.sheet__scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(25, 25, 25, 0.18);
+  animation: fade var(--normal) var(--ease);
+}
+
+.sheet__panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  width: min(760px, 84%);
+  flex-direction: column;
+  border-left: 1px solid var(--line);
+  background: var(--paper);
+  box-shadow: -18px 0 48px rgba(15, 15, 15, 0.12);
+  animation: slide-in var(--normal) var(--ease);
+}
+
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(10px);
+  }
+}
+
+.sheet__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.sheet__titles {
+  min-width: 0;
+}
+
+.sheet__title {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: var(--text-title);
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sheet__path {
+  overflow: hidden;
+  margin-top: 3px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sheet__head .spacer {
+  flex: 1;
+}
+
+.sheet__tabs {
+  display: inline-flex;
+  flex: 0 0 auto;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-sunk);
+}
+
+.tab {
+  height: 24px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  transition: background var(--fast) var(--ease), color var(--fast) var(--ease);
+}
+
+.tab:hover:not(.tab--active) {
+  color: var(--ink);
+}
+
+.tab--active {
+  background: var(--paper);
+  box-shadow: var(--shadow-card);
+  color: var(--ink);
+}
+
+.sheet__dirty {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  align-self: center;
+  border-radius: 50%;
+  background: var(--ink);
+}
+
+.sheet__body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 24px 28px;
+}
+
+.sheet__body--edit {
+  display: flex;
+  padding: 18px 20px;
+}
+
+.sheet__foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-sunk);
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.sheet__foot .spacer {
+  flex: 1;
+}
+
+.sheet__note {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sheet__note--error {
+  color: var(--danger);
+}
+
+@media (max-width: 1100px) {
+  .sheet__panel {
+    width: 100%;
+  }
+}
+
+/* --------------------------------------------------------- rendered markdown */
+
+/*
+ * Reading copy, not UI copy: body size and line height from the scale, one hairline around
+ * code, and no colour except ink - the same restraint as the rest of the app.
+ */
+
+.md {
+  color: var(--ink-soft);
+  font-size: var(--text-body);
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.md > * + * {
+  margin-top: 14px;
+}
+
+.md h1,
+.md h2,
+.md h3,
+.md h4 {
+  color: var(--ink);
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  line-height: 1.3;
+}
+
+.md h1 {
+  font-size: var(--text-h1);
+}
+
+.md h2 {
+  font-size: var(--text-h2);
+}
+
+.md h3 {
+  font-size: var(--text-title);
+}
+
+.md h4 {
+  font-size: var(--text-body);
+}
+
+.md p {
+  margin: 0;
+}
+
+.md ul,
+.md ol {
+  margin: 0;
+  padding-left: 22px;
+}
+
+.md li + li {
+  margin-top: 4px;
+}
+
+.md code {
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunk);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.md pre {
+  overflow: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-sunk);
+  line-height: 1.55;
+}
+
+.md pre code {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: var(--text-sm);
+  white-space: pre;
+}
+
+.md blockquote {
+  margin: 0;
+  padding: 2px 0 2px 14px;
+  border-left: 2px solid var(--line-strong);
+  color: var(--muted);
+}
+
+.md hr {
+  height: 1px;
+  margin: 22px 0;
+  border: 0;
+  background: var(--line);
+}
+
+.md a,
+.md__link {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.md__link:hover {
+  background: var(--surface);
+}
+
+.md__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.md__table th,
+.md__table td {
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.md__table th {
+  background: var(--surface-sunk);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* -------------------------------------------------------------- the editor */
+
+.md-editor {
+  width: 100%;
+  height: 100%;
+  min-height: 320px;
+  flex: 1;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--text-ui);
+  line-height: 1.7;
+  resize: none;
+  tab-size: 2;
+}
+
+.md-editor:focus {
+  outline: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sheet__panel,
+  .sheet__scrim {
+    animation: none;
+  }
 }

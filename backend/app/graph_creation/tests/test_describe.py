@@ -49,7 +49,7 @@ def _describer(
     models: _ScriptedModels,
     *,
     model: str = "gemini-2.5-flash-lite",
-    thinking_budget: int | None = 0,
+    thinking_level: str = "",
     max_output_tokens: int = 1024,
     fallback_models: Sequence[str] | None = None,
 ) -> GeminiDescriber:
@@ -59,7 +59,7 @@ def _describer(
         api_key="",
         model=model,
         max_output_tokens=max_output_tokens,
-        thinking_budget=thinking_budget,
+        thinking_level=thinking_level,
         fallback_models=fallback_models,
         client=client,
     )
@@ -76,17 +76,17 @@ def test_requires_an_api_key_when_building_its_own_client() -> None:
         GeminiDescriber(api_key="", model="gemini-2.5-flash-lite")
 
 
-async def test_zero_thinking_budget_sends_no_thinking_config() -> None:
+async def test_a_blank_thinking_level_sends_no_thinking_config() -> None:
     models = _ScriptedModels({"m": [_Response("A guide.")]})
-    describer = _describer(models, model="m", thinking_budget=0)
+    describer = _describer(models, model="m", thinking_level="")
 
     assert await _describe(describer) == "A guide."
     assert models.calls == [("m", False)]
 
 
-async def test_positive_thinking_budget_is_sent() -> None:
+async def test_a_configured_thinking_level_is_sent() -> None:
     models = _ScriptedModels({"m": [_Response("A guide.")]})
-    describer = _describer(models, model="m", thinking_budget=512)
+    describer = _describer(models, model="m", thinking_level="high")
 
     await _describe(describer)
     assert models.calls == [("m", True)]
@@ -95,7 +95,7 @@ async def test_positive_thinking_budget_is_sent() -> None:
 async def test_rejected_thinking_config_is_retried_without_it() -> None:
     rejected = RuntimeError("400 INVALID_ARGUMENT. Request contains an invalid argument.")
     models = _ScriptedModels({"m": [rejected, _Response("A guide.")]})
-    describer = _describer(models, model="m", thinking_budget=512)
+    describer = _describer(models, model="m", thinking_level="high")
 
     assert await _describe(describer) == "A guide."
     assert models.calls == [("m", True), ("m", False)]
@@ -104,7 +104,7 @@ async def test_rejected_thinking_config_is_retried_without_it() -> None:
 async def test_thinking_is_dropped_for_later_calls_once_rejected() -> None:
     rejected = RuntimeError("400 INVALID_ARGUMENT. Request contains an invalid argument.")
     models = _ScriptedModels({"m": [rejected, _Response("A guide."), _Response("Another.")]})
-    describer = _describer(models, model="m", thinking_budget=512)
+    describer = _describer(models, model="m", thinking_level="high")
 
     await _describe(describer, "a.md", "# A")
     await _describe(describer, "b.md", "# B")
@@ -118,7 +118,7 @@ async def test_quota_errors_skip_to_the_next_model_without_retrying() -> None:
     )
     models = _ScriptedModels({"m": [quota], "gemini-2.5-flash": [_Response("Fallback.")]})
     describer = _describer(
-        models, model="m", thinking_budget=0, fallback_models=("gemini-2.5-flash",)
+        models, model="m", thinking_level="", fallback_models=("gemini-2.5-flash",)
     )
 
     assert await _describe(describer) == "Fallback."
@@ -135,7 +135,7 @@ async def test_overload_is_retried_on_the_same_model(monkeypatch: pytest.MonkeyP
 
     overload = RuntimeError("503 UNAVAILABLE: the model is overloaded")
     models = _ScriptedModels({"m": [overload, overload, _Response("Third time lucky.")]})
-    describer = _describer(models, model="m", thinking_budget=0)
+    describer = _describer(models, model="m", thinking_level="")
 
     assert await _describe(describer) == "Third time lucky."
     assert sleeps == [1.0, 2.0]
@@ -143,7 +143,7 @@ async def test_overload_is_retried_on_the_same_model(monkeypatch: pytest.MonkeyP
 
 async def test_empty_text_with_thinking_retries_without_it() -> None:
     models = _ScriptedModels({"m": [_Response(""), _Response("A guide.")]})
-    describer = _describer(models, model="m", thinking_budget=512)
+    describer = _describer(models, model="m", thinking_level="high")
 
     assert await _describe(describer) == "A guide."
     assert models.calls == [("m", True), ("m", False)]
@@ -161,7 +161,7 @@ async def test_every_model_failing_reports_the_last_error() -> None:
     describer = _describer(
         models,
         model="m",
-        thinking_budget=0,
+        thinking_level="",
         fallback_models=("gemini-2.5-flash", "gemini-2.5-pro"),
     )
 
@@ -183,7 +183,7 @@ async def test_without_fallbacks_only_the_configured_model_is_called() -> None:
 
 async def test_bad_api_key_fails_immediately() -> None:
     models = _ScriptedModels({"m": [RuntimeError("401 UNAUTHENTICATED: API key not valid")]})
-    describer = _describer(models, model="m", thinking_budget=0)
+    describer = _describer(models, model="m", thinking_level="")
 
     with pytest.raises(RuntimeError, match="API key not valid"):
         await _describe(describer)

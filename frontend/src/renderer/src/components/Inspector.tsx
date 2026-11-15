@@ -1,7 +1,13 @@
 import { humanBytes } from '../lib/format'
 import type { FocusNodeModel } from '../lib/focusGraph'
 
-export function Inspector({ node }: { node: FocusNodeModel | null }) {
+export function Inspector({
+  node,
+  onOpenFile
+}: {
+  node: FocusNodeModel | null
+  onOpenFile?: (fileId: string) => void
+}) {
   if (!node) {
     return (
       <div className="side__body">
@@ -9,7 +15,8 @@ export function Inspector({ node }: { node: FocusNodeModel | null }) {
           <span className="side__label">Nothing selected</span>
           <p className="side__text">
             Pick a card to read its description and counts. Press a folder once to select it and
-            again to open it; drag cards to rearrange the tree.
+            again to open it; double-click a document to read or edit it. Drag cards to rearrange
+            the tree.
           </p>
         </div>
         <div className="side__section">
@@ -39,6 +46,22 @@ export function Inspector({ node }: { node: FocusNodeModel | null }) {
           <p className="side__text">{node.description ?? 'Nothing written for this yet.'}</p>
         </div>
       )}
+
+      {node.kind === 'file' && onOpenFile ? (
+        <div className="side__section">
+          <span className="side__label">Document</span>
+          <p className="side__text">
+            Double-click the card to read it, or open it here to edit the markdown.
+          </p>
+          <button
+            type="button"
+            className="btn btn--primary btn--sm"
+            onClick={() => onOpenFile(node.refId)}
+          >
+            Open document
+          </button>
+        </div>
+      ) : null}
 
       <div className="kv">
         <div className="kv__row">

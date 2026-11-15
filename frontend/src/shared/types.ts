@@ -55,6 +55,33 @@ export interface DirectoryChildren {
   directories: Directory[]
 }
 
+/** A document body as the viewer receives it (mirrors the backend's FileContentOut). */
+export interface FileContent {
+  id: string
+  name: string
+  path: string
+  size_bytes: number
+  content_sha256: string
+  text: string
+  /** Markdown and within the read cap; otherwise the sheet is read-only. */
+  editable: boolean
+  /** The stored text exceeded the read cap, so `text` was cut for display. */
+  truncated: boolean
+}
+
+/** What the sheet sends to save a document (mirrors FileContentIn). */
+export interface FileContentInput {
+  fileId: string
+  text: string
+  /** The digest that was read; a mismatch refuses the write, so nothing stale overwrites it. */
+  expectedSha256?: string | null
+}
+
+/** The row after a save (mirrors the backend's FileSavedOut). */
+export interface FileSaved extends ProjectFile {
+  content_sha256: string
+}
+
 export interface CreationJob {
   id: string
   project_id: string
@@ -256,6 +283,10 @@ export interface JyTeamsApi {
     tree(id: string, depth: number): Promise<ApiResult<ProjectTree>>
     directory(id: string): Promise<ApiResult<DirectoryChildren>>
     job(id: string): Promise<ApiResult<CreationJob>>
+  }
+  files: {
+    read(fileId: string): Promise<ApiResult<FileContent>>
+    save(input: FileContentInput): Promise<ApiResult<FileSaved>>
   }
   layout: {
     load(projectId: string): Promise<Record<string, XYPosition>>

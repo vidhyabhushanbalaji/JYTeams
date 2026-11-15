@@ -1,6 +1,6 @@
 """Folder describers: Gemini for real use, a deterministic mock for tests.
 
-Gemini (``gemini-2.5-flash-lite``) is the only provider. Graph Add no longer summarises the
+Gemini (``gemini-3.1-flash-lite``) is the only provider. Graph Add no longer summarises the
 document it places. After a placement it asks for the updated description of every affected
 folder — the new folder (if one was created), the folder it landed in, and its ancestors — in a
 single call, then applies whatever comes back.
@@ -96,7 +96,7 @@ class GeminiFolderDescriber:
         *,
         api_key: str,
         model: str,
-        max_output_tokens: int = 1024,
+        max_output_tokens: int = 2048,
         max_chars: int = 300,
         min_interval_seconds: float = 0.0,
         client: Any | None = None,
@@ -124,6 +124,8 @@ class GeminiFolderDescriber:
                 temperature=0,
                 max_output_tokens=self._max_output_tokens,
                 response_mime_type="application/json",
+                # No tools are declared, so automatic function calling is pure overhead.
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             ),
         )
         text = (getattr(response, "text", None) or "").strip()

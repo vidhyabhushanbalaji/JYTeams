@@ -72,6 +72,10 @@ class GraphRepository(Protocol):
 
     async def insert_files(self, rows: list[Row]) -> list[Row]: ...
 
+    async def update_file(self, file_id: str, fields: Row) -> Row: ...
+
+    async def get_file(self, file_id: str) -> Row | None: ...
+
     async def update_directory(self, directory_id: str, fields: Row) -> Row: ...
 
     async def get_directory(self, directory_id: str) -> Row | None: ...
@@ -181,6 +185,18 @@ class SupabaseGraphRepository:
 
     async def insert_files(self, rows: list[Row]) -> list[Row]:
         return await self._insert("files", rows)
+
+    async def update_file(self, file_id: str, fields: Row) -> Row:
+        def run() -> Row:
+            response = admin_client().table("files").update(fields).eq("id", file_id).execute()
+            return response.data[0]
+
+        return await self._run(run)
+
+    async def get_file(self, file_id: str) -> Row | None:
+        return await self._one(
+            lambda: admin_client().table("files").select("*").eq("id", file_id).limit(1)
+        )
 
     async def update_directory(self, directory_id: str, fields: Row) -> Row:
         def run() -> Row:

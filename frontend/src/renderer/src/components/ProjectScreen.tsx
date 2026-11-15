@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 
-import type { PlacementResult, SearchHit } from '@shared/types'
+import type { FileSaved, PlacementResult, SearchHit } from '@shared/types'
 
 import { describeError } from '../lib/errors'
 import { fileNodeId } from '../lib/focusGraph'
 import { useFocusGraph } from '../state/useFocusGraph'
 import { useSearch } from '../state/useSearch'
 import { AddDocumentFlow } from './AddDocumentFlow'
+import { DocumentSheet } from './DocumentSheet'
 import { GraphCanvas } from './GraphCanvas'
 import { Inspector } from './Inspector'
 import { SearchResults } from './SearchResults'
@@ -26,6 +27,7 @@ export function ProjectScreen({
   const [side, setSide] = useState<'inspector' | 'search'>('inspector')
   const [query, setQuery] = useState('')
   const [adding, setAdding] = useState(false)
+  const [openFileId, setOpenFileId] = useState<string | null>(null)
 
   const view = graph.view
 
@@ -53,13 +55,20 @@ export function ProjectScreen({
   }
 
   const openFolder = (refId: string): void => {
+    setOpenFileId(null)
     graph.select(null)
     void graph.enter(refId)
   }
 
   const openHit = async (hit: SearchHit): Promise<void> => {
+    setOpenFileId(null)
     await graph.revealPath(hit.directory_path)
     graph.focusNode(fileNodeId(hit.file_id))
+  }
+
+  const saved = (result: FileSaved): void => {
+    notify(`Saved ${result.name}.`)
+    void graph.refreshCurrent()
   }
 
   const placed = async (result: PlacementResult): Promise<void> => {
@@ -186,15 +195,22 @@ export function ProjectScreen({
                     dimmed={search.results !== null && search.results.results.length > 0}
                     onSelect={graph.select}
                     onOpen={openFolder}
+                    onOpenFile={setOpenFileId}
                     onMove={graph.move}
                   />
                 </div>
                 <p className="canvas__hint">
-                  Click a card to read it · click a folder again to open it · drag to rearrange
+                  Click a card to read it · double-click a document to open it · drag to rearrange
                 </p>
               </>
             )
           ) : null}
+
+          <DocumentSheet
+            fileId={openFileId}
+            onClose={() => setOpenFileId(null)}
+            onSaved={saved}
+          />
         </div>
 
         <aside className="workspace__side">
@@ -223,7 +239,7 @@ export function ProjectScreen({
               onOpenHit={(hit) => void openHit(hit)}
             />
           ) : (
-            <Inspector node={selected ?? view?.centre ?? null} />
+            <Inspector node={selected ?? view?.centre ?? null} onOpenFile={setOpenFileId} />
           )}
         </aside>
       </div>

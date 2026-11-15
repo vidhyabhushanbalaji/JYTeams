@@ -67,6 +67,22 @@ describe('SearchResults', () => {
     expect(markup).toContain('deployment')
   })
 
+  it('keeps the hits in a scrollable panel, with the summary line pinned', () => {
+    const markup = render(RESULTS)
+
+    // The panel head is fixed, so the results themselves own the scroll region.
+    expect(markup).toContain('class="side__scroll"')
+    expect(markup).toContain('class="search__meta"')
+  })
+
+  it('still scrolls when nothing matched', () => {
+    const markup = render({ ...RESULTS, results: [] })
+
+    expect(markup).toContain('class="side__scroll"')
+    expect(markup).toContain('side__pad')
+    expect(markup).toContain('Nothing answered that')
+  })
+
   it('describes the local walk from the traversal fields', () => {
     const markup = render(RESULTS)
 

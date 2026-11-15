@@ -22,7 +22,7 @@ the error red.
 npm install          # first time only
 npm run dev          # Vite dev server + Electron with HMR
 npm run typecheck    # tsc --noEmit for the main/preload project and the renderer project
-npm test             # vitest: the graph rules, the formatters and the payload adapters
+npm test             # vitest: the graph rules, the markdown renderer, the formatters and the payload adapters
 npm run build        # production bundles into out/
 npm run dist:win     # NSIS installer (must run on Windows)
 npm run dist:mac     # DMG, arm64 + x64 (must run on macOS)
@@ -85,6 +85,13 @@ in the repository.
    an excerpt cut from the document itself; matching cards are outlined on the canvas and
    everything else dims. Clicking a hit expands the ancestors it needs and centres the file.
    The walk is local and read-only, so a search makes no model calls.
+6. **Document** - double-click a file card (or use **Open document** in the inspector) and its
+   markdown opens in a sheet over the canvas, leaving the folder you came from visible. **Read**
+   renders it through the hand-rolled renderer in `lib/markdown.tsx`; **Edit** swaps in a plain
+   textarea with **Save**, **Cancel** and `Ctrl/Cmd+S`; closing with unsaved changes asks first.
+   The sheet names the path and size, counts words, and says so when a document is too large to
+   edit. Saving sends the digest it read, so a stale window gets a `409` instead of overwriting
+   a newer edit - and it costs no model call, so folder descriptions refresh on the next add.
 
 ## The tree
 
@@ -139,13 +146,13 @@ src/
 │  ├─ ipc.ts              # one channel per API call
 │  ├─ config.ts           # backend address + identity, in userData
 │  ├─ layout.ts           # per-project card positions
-│  ├─ api/                # fetch wrapper, endpoint calls, error normalisation
+│  ├─ api/                # fetch wrapper, endpoint calls (incl. files.ts), error normalisation
 │  └─ fs/walk.ts          # folder walk: markdown only, POSIX relative paths, limits
 ├─ preload/               # contextBridge surface + its .d.ts
 └─ renderer/src/
-   ├─ lib/                # focusGraph, treeLayout, format, errors (pure, unit tested)
-   ├─ state/              # useFocusGraph, useProjects, useSearch, usePositions, useToasts
-   ├─ components/         # rail, home, project, canvas, nodes, inspector, the two flows
+   ├─ lib/                # focusGraph, treeLayout, markdown, format, errors (pure, unit tested)
+   ├─ state/              # useFocusGraph, useProjects, useSearch, useDocument, usePositions, useToasts
+   ├─ components/         # rail, home, project, canvas, nodes, inspector, document sheet, the two flows
    └─ styles/             # tokens.css, app.css
 ```
 
@@ -158,8 +165,16 @@ src/
 - **npm 12 blocks install scripts by default.** Electron's postinstall did not run, so the
   binary was fetched with `node node_modules/electron/install.js`. On a fresh clone do the
   same if the app will not start.
-- **No file-content viewer.** The backend exposes summaries and descriptions, not document
-  bodies, so the app shows those.
+- **Documents open in the app.** A double-click reads the stored markdown through
+  `GET /api/graph-creation/files/{id}/content`; **Edit** saves it with
+  `PUT …/content`. Two decisions matter: the renderer is **hand-rolled**
+  (`lib/markdown.tsx`) so the client still has no markdown dependency and every element is a
+  React node - raw HTML in a document shows up as text, never as markup - and the editor is a
+  plain textarea, because a document stored as text is edited faithfully as text. Saving sends
+  the digest it read, so a stale window gets a `409` rather than overwriting a newer edit.
+  Because a save makes **no model call**, a folder's description can lag its documents until
+  the next add or placement; search still finds the new words, since it reads the document
+  itself.
 - **Search and add are slow on purpose.** Both are real model walks; the UI treats them as
   deliberate actions with progress states rather than typing-time suggestions.
 - **No login screen.** The app speaks to `AUTH_MODE=dev` today; a bearer token can be pasted

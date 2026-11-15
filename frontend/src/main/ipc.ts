@@ -6,8 +6,9 @@
 import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import type { IpcMainInvokeEvent, OpenDialogOptions } from 'electron'
 
-import type { AppConfig, PlacementInput, XYPosition } from '../shared/types'
+import type { AppConfig, FileContentInput, PlacementInput, XYPosition } from '../shared/types'
 import { run } from './api/client'
+import { readFileContent, saveFileContent } from './api/files'
 import { ping } from './api/health'
 import { getDirectory, getJob, getProject, getTree, listProjects } from './api/projects'
 import { searchProject } from './api/search'
@@ -43,6 +44,11 @@ export function registerIpc(): void {
     run(() => getDirectory(directoryId))
   )
   ipcMain.handle('projects:job', (_event, jobId: string) => run(() => getJob(jobId)))
+
+  ipcMain.handle('files:read', (_event, fileId: string) => run(() => readFileContent(fileId)))
+  ipcMain.handle('files:save', (_event, input: FileContentInput) =>
+    run(() => saveFileContent(input.fileId, input))
+  )
 
   ipcMain.handle('layout:load', (_event, projectId: string) => loadLayout(projectId))
   ipcMain.handle('layout:save', (_event, projectId: string, positions: Record<string, XYPosition>) =>

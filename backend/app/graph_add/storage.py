@@ -16,6 +16,7 @@ from typing import Protocol
 
 from starlette.concurrency import run_in_threadpool
 
+from app.core.retry import call_with_retries
 from app.db.supabase import admin_client
 
 logger = logging.getLogger(__name__)
@@ -74,8 +75,13 @@ class SupabaseObjectStore:
 
         def upload() -> None:
             try:
-                admin_client().storage.from_(self.bucket).upload(
-                    key, data, {"content-type": _CONTENT_TYPE}
+                # A dropped connection must not lose the placement that was just scored.
+                call_with_retries(
+                    lambda: (
+                        admin_client()
+                        .storage.from_(self.bucket)
+                        .upload(key, data, {"content-type": _CONTENT_TYPE})
+                    )
                 )
             except Exception as exc:  # noqa: BLE001 - duplicates are expected and fine
                 message = str(exc).lower()
@@ -92,7 +98,9 @@ class SupabaseObjectStore:
 
         def download() -> bytes:
             try:
-                return admin_client().storage.from_(bucket).download(path)
+                return call_with_retries(
+                    lambda: admin_client().storage.from_(bucket).download(path)
+                )
             except Exception as exc:  # noqa: BLE001 - surfaced as one typed error
                 raise StorageError(f"could not read {bucket}/{path}: {exc}") from exc
 

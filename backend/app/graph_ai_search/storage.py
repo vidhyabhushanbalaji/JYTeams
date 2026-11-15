@@ -18,6 +18,7 @@ from typing import Protocol
 
 from starlette.concurrency import run_in_threadpool
 
+from app.core.retry import call_with_retries
 from app.db.supabase import admin_client
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,10 @@ class SupabaseBlobStore:
     async def get(self, *, bucket: str, path: str) -> bytes:
         def download() -> bytes:
             try:
-                return admin_client().storage.from_(bucket).download(path)
+                # One retry more than not at all: a blip should not mark a search degraded.
+                return call_with_retries(
+                    lambda: admin_client().storage.from_(bucket).download(path)
+                )
             except Exception as exc:  # noqa: BLE001 - surfaced as one typed error
                 raise StorageUnavailable(f"could not read {bucket}/{path}: {exc}") from exc
 

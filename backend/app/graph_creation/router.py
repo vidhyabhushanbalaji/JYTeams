@@ -19,6 +19,9 @@ from app.graph_creation.ingest import collect_uploads
 from app.graph_creation.repository import SupabaseGraphRepository
 from app.graph_creation.schemas import (
     DirectoryChildrenOut,
+    FileContentIn,
+    FileContentOut,
+    FileSavedOut,
     JobOut,
     ProjectOut,
     ProjectTreeOut,
@@ -129,6 +132,29 @@ async def get_directory(
 ) -> DirectoryChildrenOut:
     result = await service.get_directory(directory_id, user.id)
     return DirectoryChildrenOut(**result)
+
+
+@router.get(
+    "/files/{file_id}/content",
+    response_model=FileContentOut,
+    summary="Read one document's markdown",
+)
+async def get_file_content(file_id: str, user: UserDep, service: ServiceDep) -> FileContentOut:
+    return FileContentOut(**await service.get_file_content(file_id, user.id))
+
+
+@router.put(
+    "/files/{file_id}/content",
+    response_model=FileSavedOut,
+    summary="Save one document's markdown (no model call)",
+)
+async def save_file_content(
+    file_id: str, payload: FileContentIn, user: UserDep, service: ServiceDep
+) -> FileSavedOut:
+    saved = await service.save_file_content(
+        file_id, user.id, text=payload.text, expected_sha256=payload.expected_sha256
+    )
+    return FileSavedOut(**saved)
 
 
 @router.get("/jobs/{job_id}", response_model=JobOut, summary="Get the status of an upload job")

@@ -83,3 +83,35 @@ class DirectoryChildrenOut(BaseModel):
     directory: DirectoryOut
     files: list[FileOut] = Field(default_factory=list)
     directories: list[DirectoryOut] = Field(default_factory=list)
+
+
+class FileContentOut(BaseModel):
+    """One document's stored markdown, ready for the viewer."""
+
+    id: str
+    name: str
+    path: str
+    size_bytes: int
+    content_sha256: str
+    text: str
+    #: Markdown, and short enough to edit here; otherwise the sheet is read-only.
+    editable: bool
+    #: True when the stored text exceeded FILE_EDIT_MAX_CHARS and ``text`` was cut for display.
+    truncated: bool = False
+
+
+class FileContentIn(BaseModel):
+    """A replacement body.
+
+    ``expected_sha256`` is the digest the client read; when it no longer matches, the save is
+    refused so a stale window cannot overwrite a newer edit.
+    """
+
+    text: str
+    expected_sha256: str | None = None
+
+
+class FileSavedOut(FileOut):
+    """The file row after a save, plus the digest the client should quote next time."""
+
+    content_sha256: str

@@ -423,3 +423,117 @@ async def test_the_add_refresh_is_clipped_too() -> None:
     for row in await repository.list_directories(project_id):
         assert row["description"]
         assert len(row["description"]) <= 300
+
+
+async def _one_document(
+    entries: list[FileEntry] | None = None, settings: Any | None = None
+) -> tuple[GraphCreationService, InMemoryGraphRepository, InMemoryObjectStore, list[dict]]:
+    """Upload a tiny project and return the service plus its file rows."""
+    service, repository, store = _service(settings=settings)
+    prepared = await service.prepare(
+        owner_id="user-1",
+        mode=UploadMode.NEW,
+        name="Docs",
+        entries=entries or [FileEntry("docs/guide.md", b"# Guide\n\nOriginal.")],
+    )
+    await service.run_job(prepared)
+    files = await repository.list_files(prepared.project["id"])
+    return service, repository, store, files
+
+
+async def test_a_document_body_can_be_read_back() -> None:
+    service, _, _, files = await _one_document()
+
+    content = await service.get_file_content(files[0]["id"], "user-1")
+
+    assert content["text"] == "# Guide\n\nOriginal."
+    assert content["path"] == "docs/guide.md"
+    assert content["editable"] is True
+    assert content["truncated"] is False
+    assert content["content_sha256"] == files[0]["content_sha256"]
+
+
+async def test_saving_stores_a_new_object_and_repoints_the_row() -> None:
+    service, repository, store, files = await _one_document()
+    original = files[0]
+    old_path = original["storage_path"]
+
+    saved = await service.save_file_content(
+        original["id"],
+        "user-1",
+        text="# Guide\n\nEdited.",
+        expected_sha256=original["content_sha256"],
+    )
+
+    assert saved["content_sha256"] != original["content_sha256"]
+    assert saved["storage_path"] != old_path
+    assert saved["size_bytes"] == len(b"# Guide\n\nEdited.")
+    assert store.objects[saved["storage_path"]] == b"# Guide\n\nEdited."
+    # Blobs are content-addressed and shared, so the old object is never overwritten.
+    assert store.objects[old_path] == b"# Guide\n\nOriginal."
+    row = await repository.get_file(original["id"])
+    assert row["storage_path"] == saved["storage_path"]
+    assert row["content_sha256"] == saved["content_sha256"]
+
+
+async def test_editing_one_of_two_identical_documents_leaves_the_other_alone() -> None:
+    service, repository, store, files = await _one_document(
+        [FileEntry("docs/a.md", b"# Same"), FileEntry("docs/b.md", b"# Same")]
+    )
+    first, second = files
+    shared = first["storage_path"]
+    assert second["storage_path"] == shared
+
+    await service.save_file_content(first["id"], "user-1", text="# Changed")
+
+    untouched = await repository.get_file(second["id"])
+    assert untouched["storage_path"] == shared
+    assert store.objects[shared] == b"# Same"
+
+
+async def test_a_stale_digest_is_refused() -> None:
+    service, _, _, files = await _one_document()
+
+    with pytest.raises(HTTPException) as excinfo:
+        await service.save_file_content(
+            files[0]["id"], "user-1", text="# New", expected_sha256="not-the-current-digest"
+        )
+
+    assert excinfo.value.status_code == 409
+
+
+async def test_an_oversized_body_is_refused() -> None:
+    from app.core.config import Settings
+
+    service, _, _, files = await _one_document(
+        [FileEntry("docs/a.md", b"# A")], settings=Settings(max_file_bytes=16)
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await service.save_file_content(files[0]["id"], "user-1", text="x" * 17)
+
+    assert excinfo.value.status_code == 413
+
+
+async def test_another_users_document_is_not_found() -> None:
+    service, _, _, files = await _one_document()
+
+    with pytest.raises(HTTPException) as excinfo:
+        await service.get_file_content(files[0]["id"], "someone-else")
+
+    assert excinfo.value.status_code == 404
+
+
+async def test_a_document_over_the_read_cap_opens_read_only() -> None:
+    from app.core.config import Settings
+
+    service, _, _, files = await _one_document(
+        [FileEntry("docs/big.md", b"# Big\n\n" + b"x" * 1_200)],
+        settings=Settings(file_edit_max_chars=1_000),
+    )
+
+    content = await service.get_file_content(files[0]["id"], "user-1")
+
+    assert content["truncated"] is True
+    assert content["editable"] is False
+    assert len(content["text"]) == 1_000

@@ -85,10 +85,25 @@ def test_an_explicit_mock_summarizer_wins_over_a_key(
     assert Settings().resolved_summarizer == "mock"
 
 
-def test_the_shipped_default_model_is_gemini_2_5_flash_lite() -> None:
-    assert Settings.model_fields["gemini_model"].default == "gemini-2.5-flash-lite"
+def test_the_shipped_default_model_is_gemini_3_1_flash_lite() -> None:
+    assert Settings.model_fields["gemini_model"].default == "gemini-3.1-flash-lite"
     # No fallbacks by default: every description is written by the configured model.
     assert Settings.model_fields["gemini_fallback_models"].default == ""
+
+
+def test_thinking_is_off_unless_a_level_is_configured() -> None:
+    assert Settings.model_fields["gemini_thinking_level"].default == ""
+    assert Settings().gemini_thinking_level == ""
+    # ``thinking_level`` replaces the numeric budget, which models from 3.5 reject.
+    assert "gemini_thinking_budget" not in Settings.model_fields
+
+
+def test_a_thinking_level_is_normalised_and_validated() -> None:
+    from pydantic import ValidationError
+
+    assert Settings(gemini_thinking_level=" HIGH ").gemini_thinking_level == "high"
+    with pytest.raises(ValidationError):
+        Settings(gemini_thinking_level="turbo")
 
 
 def test_gemini_models_keep_their_order_and_deduplicate() -> None:

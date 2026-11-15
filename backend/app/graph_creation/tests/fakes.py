@@ -88,6 +88,14 @@ class InMemoryGraphRepository:
             inserted.append(dict(record))
         return inserted
 
+    async def update_file(self, file_id: str, fields: Row) -> Row:
+        self.files[file_id].update(fields)
+        return dict(self.files[file_id])
+
+    async def get_file(self, file_id: str) -> Row | None:
+        row = self.files.get(file_id)
+        return dict(row) if row else None
+
     async def update_directory(self, directory_id: str, fields: Row) -> Row:
         self.directories[directory_id].update(fields)
         return dict(self.directories[directory_id])
