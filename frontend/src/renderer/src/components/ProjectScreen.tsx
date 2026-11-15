@@ -18,7 +18,7 @@ import { stepIndex } from '../lib/tickets'
 import { useFocusGraph } from '../state/useFocusGraph'
 import { useProjects } from '../state/useProjects'
 import { useSearch } from '../state/useSearch'
-import { AddDocumentFlow } from './AddDocumentFlow'
+import { AddDocumentFlow, type PlacementOrigin } from './AddDocumentFlow'
 import { DocumentSheet } from './DocumentSheet'
 import { GraphCanvas } from './GraphCanvas'
 import { Inspector } from './Inspector'
@@ -147,11 +147,13 @@ export function ProjectScreen({
     void graph.refreshCurrent()
   }
 
-  const placed = async (result: PlacementResult): Promise<void> => {
+  const placed = async (result: PlacementResult, origin: PlacementOrigin): Promise<void> => {
     notify(`Added ${result.file.name} to ${result.directory_path || 'the project root'}.`)
     await graph.revealPath(result.directory_path)
     await graph.refreshCurrent()
     graph.focusNode(fileNodeId(result.file.id))
+    // A document written here has never been read - open it so the words are where they landed.
+    if (origin === 'draft') setOpenFileId(result.file.id)
   }
 
   const isEmpty = view !== null && view.nodes.length <= 1
@@ -396,7 +398,7 @@ export function ProjectScreen({
         open={adding}
         projectId={projectId}
         onClose={() => setAdding(false)}
-        onPlaced={(result) => void placed(result)}
+        onPlaced={(result, origin) => void placed(result, origin)}
       />
 
       <ShareProjectDialog

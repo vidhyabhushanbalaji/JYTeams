@@ -10,6 +10,7 @@ import { readFile, stat } from 'node:fs/promises'
 import { basename } from 'node:path'
 
 import type {
+  DraftSuggestionInput,
   PickedFile,
   PlacementInput,
   PlacementResult,
@@ -59,6 +60,31 @@ export async function suggestPlacement(input: {
   form.append('project_id', input.projectId)
   if (input.context) form.append('context', input.context)
   form.append('file', new File([bytes], basename(input.filePath), { type: 'text/markdown' }))
+
+  return request<SuggestionAccepted>('/api/graph-add/suggestions', {
+    method: 'POST',
+    body: form,
+    timeoutMs: LONG_TIMEOUT_MS
+  })
+}
+
+/**
+ * Rank the folders for a document written in the app.
+ *
+ * Nothing touches the disk: the editor's text becomes the bytes of the same multipart part an
+ * upload would carry, so Graph Add stores and scores it exactly as if it had been read from a
+ * file. Scored locally in the backend - no model call.
+ */
+export async function suggestDraftPlacement(input: DraftSuggestionInput): Promise<SuggestionAccepted> {
+  const bytes = new TextEncoder().encode(input.text)
+  if (bytes.length === 0) {
+    throw new Error('The document is empty. Write something before finding it a folder.')
+  }
+
+  const form = new FormData()
+  form.append('project_id', input.projectId)
+  if (input.context) form.append('context', input.context)
+  form.append('file', new File([bytes], input.fileName, { type: 'text/markdown' }))
 
   return request<SuggestionAccepted>('/api/graph-add/suggestions', {
     method: 'POST',

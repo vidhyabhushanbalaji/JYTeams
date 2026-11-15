@@ -379,6 +379,10 @@ body[data-platform='mac'] .topbar {
   font-size: var(--text-sm);
 }
 
+.field__hint--error {
+  color: var(--danger);
+}
+
 /* ------------------------------------------------------- spinners + chips */
 
 .spinner {
@@ -462,6 +466,12 @@ button.chip:hover {
   background: var(--paper);
   box-shadow: var(--shadow-pop);
   animation: rise var(--normal) var(--ease);
+}
+
+/* The new-document editor needs room for prose, so its dialog is wider and taller. */
+.dialog__panel--wide {
+  width: min(900px, 100%);
+  max-height: min(92vh, 900px);
 }
 
 .dialog__head {
@@ -1885,6 +1895,49 @@ button.crumb:hover:not(:disabled) {
   outline: none;
 }
 
+/* ---------------------------------------------------- writing a document */
+
+.compose {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.compose__editor {
+  display: flex;
+  overflow: hidden;
+  min-height: 340px;
+  flex-direction: column;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--paper);
+}
+
+.compose__bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-sunk);
+}
+
+.compose__bar .spacer {
+  flex: 1;
+}
+
+.compose__editor .md-editor {
+  min-height: 280px;
+  flex: 1;
+  padding: 14px 16px;
+}
+
+.compose__editor .md {
+  overflow: auto;
+  flex: 1;
+  padding: 16px 18px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .sheet__panel,
   .sheet__scrim {
@@ -2122,7 +2175,7 @@ button.crumb:hover:not(:disabled) {
   padding: 0;
   margin: 0;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
   list-style: none;
 }
 
@@ -2132,19 +2185,21 @@ button.crumb:hover:not(:disabled) {
   align-items: flex-start;
   gap: 10px;
   padding: 10px 12px;
-  border: 1px solid transparent;
+  border: 1px solid var(--line);
   border-radius: var(--radius);
+  background: var(--paper);
   text-align: left;
   transition: background var(--fast) var(--ease), border-color var(--fast) var(--ease);
 }
 
 .ticket-row:hover {
+  border-color: var(--line-strong);
   background: var(--surface);
 }
 
 .ticket-row--active {
-  border-color: var(--line-strong);
-  background: var(--surface);
+  border-color: var(--ink);
+  background: var(--surface-sunk);
 }
 
 .ticket-row--done .ticket-row__title {
@@ -2206,31 +2261,49 @@ button.crumb:hover:not(:disabled) {
 }
 
 .ticket-row__badge {
-  color: var(--muted-faint);
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-sunk);
+  color: var(--muted);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
+  white-space: nowrap;
 }
 
 .ticket-tabs {
   display: flex;
   flex: none;
+  gap: 4px;
+  padding: 8px 10px 0;
   border-bottom: 1px solid var(--line);
+  background: var(--surface-sunk);
 }
 
 .ticket-tab {
-  padding: 11px 14px;
+  padding: 8px 12px;
+  border: 1px solid transparent;
   border-bottom: 2px solid transparent;
+  border-radius: var(--radius) var(--radius) 0 0;
   color: var(--muted);
   font-size: var(--text-sm);
-  transition: color var(--fast) var(--ease), border-color var(--fast) var(--ease);
+  transition: color var(--fast) var(--ease), border-color var(--fast) var(--ease),
+    background var(--fast) var(--ease);
 }
 
 .ticket-tab:hover {
+  background: var(--surface);
   color: var(--ink);
 }
 
 .ticket-tab--active {
-  border-bottom-color: var(--ink);
+  margin-bottom: -1px;
+  border-color: var(--line);
+  border-bottom-color: var(--paper);
+  background: var(--paper);
   color: var(--ink);
 }
 
@@ -2255,24 +2328,27 @@ button.crumb:hover:not(:disabled) {
 .ticket-panel__head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px 10px;
+  flex-wrap: wrap;
 }
 
 .ticket-panel__crumbs {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
   min-width: 0;
 }
 
 .ticket-chip {
   display: inline-flex;
   align-items: center;
-  height: 20px;
-  padding: 0 7px;
-  border: 1px solid var(--line);
+  max-width: 190px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
-  background: var(--surface);
+  background: var(--surface-sunk);
   color: var(--muted);
   font-size: var(--text-xs);
   white-space: nowrap;
@@ -2287,14 +2363,65 @@ button.crumb:hover:not(:disabled) {
 }
 
 .ticket-panel__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface-sunk);
   color: var(--muted);
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.ticket-panel__status-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--muted-faint);
+}
+
+.ticket-panel__status--in_progress {
+  color: var(--ink-soft);
+}
+
+.ticket-panel__status--in_progress .ticket-panel__status-dot {
+  background: var(--muted);
+}
+
+.ticket-panel__status--done .ticket-panel__status-dot {
+  background: var(--ink);
 }
 
 .ticket-panel__head-actions {
   display: flex;
-  gap: 4px;
+  gap: 6px;
   margin-left: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* Actions sit on a faint trough so they read as controls, never as labels. */
+.ticket-panel__head-actions .btn,
+.ticket-files__actions .btn {
+  border-color: var(--line-strong);
+  background: var(--surface);
+  color: var(--ink-soft);
+}
+
+.ticket-panel__head-actions .btn:hover:not(:disabled),
+.ticket-files__actions .btn:hover:not(:disabled) {
+  background: var(--surface-deep);
+  color: var(--ink);
+}
+
+.ticket-panel__head-actions .btn:disabled,
+.ticket-files__actions .btn:disabled {
+  background: var(--surface-sunk);
+  border-color: var(--line);
 }
 
 .ticket-panel__title {
@@ -2422,7 +2549,7 @@ select.field__input {
 
 .ticket-files__actions {
   display: flex;
-  gap: 4px;
+  gap: 6px;
   margin-left: auto;
   flex-wrap: wrap;
   justify-content: flex-end;
@@ -2463,6 +2590,11 @@ select.field__input {
 .ticket-file--attached {
   border-color: var(--line-strong);
   background: var(--surface);
+}
+
+.ticket-file:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-sunk);
 }
 
 .ticket-file__open {

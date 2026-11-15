@@ -4,6 +4,7 @@ export function Dialog({
   open,
   title,
   subtitle,
+  wide = false,
   onClose,
   children,
   footer
@@ -11,6 +12,8 @@ export function Dialog({
   open: boolean
   title: string
   subtitle?: string
+  /** A wider panel for content that needs room, such as the markdown editor. */
+  wide?: boolean
   onClose: () => void
   children: ReactNode
   footer?: ReactNode
@@ -34,7 +37,12 @@ export function Dialog({
         if (event.target === event.currentTarget) onClose()
       }}
     >
-      <div className="dialog__panel" role="dialog" aria-modal="true" aria-label={title}>
+      <div
+        className={wide ? 'dialog__panel dialog__panel--wide' : 'dialog__panel'}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+      >
         <header className="dialog__head">
           <div>
             <h2 className="dialog__title">{title}</h2>

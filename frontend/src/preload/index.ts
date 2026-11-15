@@ -4,6 +4,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 import type {
   AppConfig,
+  DraftSuggestionInput,
   FileContentInput,
   JyTeamsApi,
   PlacementInput,
@@ -47,6 +48,7 @@ const api: JyTeamsApi = {
     pickFile: () => ipcRenderer.invoke('add:pick-file'),
     suggest: (input: { projectId: string; filePath: string; context?: string }) =>
       ipcRenderer.invoke('add:suggest', input),
+    suggestDraft: (input: DraftSuggestionInput) => ipcRenderer.invoke('add:suggest-draft', input),
     place: (input: PlacementInput) => ipcRenderer.invoke('add:place', input)
   },
   search: {

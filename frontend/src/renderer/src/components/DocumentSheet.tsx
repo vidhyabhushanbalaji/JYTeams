@@ -13,8 +13,9 @@ import type { FileSaved } from '@shared/types'
 
 import { describeError } from '../lib/errors'
 import { humanBytes } from '../lib/format'
-import { Markdown, wordCount } from '../lib/markdown'
+import { wordCount } from '../lib/markdown'
 import { useDocument } from '../state/useDocument'
+import { EditorTabs, MarkdownEditor } from './MarkdownEditor'
 import { ErrorBox, Spinner } from './primitives'
 
 export function DocumentSheet({
@@ -94,26 +95,10 @@ export function DocumentSheet({
           </div>
           <span className="spacer" />
           {file?.editable ? (
-            <div className="sheet__tabs" role="tablist" aria-label="Document mode">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={!editing}
-                className={`tab${editing ? '' : ' tab--active'}`}
-                onClick={showRead}
-              >
-                Read
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={editing}
-                className={`tab${editing ? ' tab--active' : ''}`}
-                onClick={beginEdit}
-              >
-                Edit
-              </button>
-            </div>
+            <EditorTabs
+              mode={editing ? 'edit' : 'read'}
+              onChange={(next) => (next === 'edit' ? beginEdit() : showRead())}
+            />
           ) : null}
           {dirty ? (
             <span className="sheet__dirty" title="Unsaved changes" aria-hidden="true" />
@@ -145,20 +130,13 @@ export function DocumentSheet({
           ) : null}
 
           {status === 'ready' && file ? (
-            editing ? (
-              <textarea
-                className="md-editor"
-                value={draft}
-                onChange={(event) => setDraft(event.target.value)}
-                aria-label={`Editing ${file.name}`}
-                spellCheck
-                autoFocus
-              />
-            ) : (
-              <article className="md">
-                <Markdown text={file.text} />
-              </article>
-            )
+            <MarkdownEditor
+              mode={editing ? 'edit' : 'read'}
+              value={editing ? draft : file.text}
+              onChange={setDraft}
+              label={`Editing ${file.name}`}
+              autoFocus
+            />
           ) : null}
         </div>
 

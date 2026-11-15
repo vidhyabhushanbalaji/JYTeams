@@ -51,7 +51,6 @@ export interface TicketPanelProps {
   onUploadFile: () => void
   onAttachExisting: () => void
   onDetach: (fileId: string) => Promise<void>
-  onShareProject: () => void
   /** Start the project chat with this ticket mentioned. */
   onDiscuss: () => void
   /** Events whose notes mention this ticket. */
@@ -133,28 +132,35 @@ export function TicketDetailPanel(props: TicketPanelProps) {
     <div className="ticket-panel">
       <header className="ticket-panel__head">
         <div className="ticket-panel__crumbs">
-          <span className="ticket-chip">{detail.project_name || 'Project'}</span>
+          <span className="ticket-chip" title={detail.project_name || 'Project'}>
+            {detail.project_name || 'Project'}
+          </span>
           <span className="ticket-panel__key">{ticketKey(detail)}</span>
-          <span className="ticket-panel__status">{STATUS_LABEL[detail.status]}</span>
+          <span className={`ticket-panel__status ticket-panel__status--${detail.status}`}>
+            <span className="ticket-panel__status-dot" aria-hidden="true" />
+            {STATUS_LABEL[detail.status]}
+          </span>
         </div>
         <div className="ticket-panel__head-actions">
           <button
             type="button"
-            className="btn btn--ghost btn--sm"
+            className="btn btn--sm"
             onClick={() => setEditing((value) => !value)}
+            title={
+              editing
+                ? 'Close the editor without saving'
+                : 'Edit the title, description, priority, due date and labels'
+            }
           >
             {editing ? 'Cancel' : 'Edit'}
           </button>
           <button
             type="button"
-            className="btn btn--ghost btn--sm"
+            className="btn btn--sm"
             onClick={props.onDiscuss}
             title="Open the project chat with this ticket mentioned"
           >
             Discuss in chat
-          </button>
-          <button type="button" className="btn btn--ghost btn--sm" onClick={props.onShareProject}>
-            Share project
           </button>
         </div>
       </header>
@@ -299,20 +305,27 @@ export function TicketDetailPanel(props: TicketPanelProps) {
           <div className="ticket-files__actions">
             <button
               type="button"
-              className="btn btn--ghost btn--sm"
+              className="btn btn--sm"
               onClick={() => void props.onRefreshFiles()}
               disabled={busy}
+              title="Search the project's documents again — no model is called"
             >
               {busy ? <Spinner label="Refreshing" /> : null}
               Refresh
             </button>
-            <button type="button" className="btn btn--sm" onClick={props.onUploadFile}>
+            <button
+              type="button"
+              className="btn btn--sm"
+              onClick={props.onUploadFile}
+              title="Upload a document and place it in the project tree"
+            >
               Add file
             </button>
             <button
               type="button"
-              className="btn btn--ghost btn--sm"
+              className="btn btn--sm"
               onClick={props.onAttachExisting}
+              title="Attach a document that is already in the project"
             >
               Attach existing
             </button>

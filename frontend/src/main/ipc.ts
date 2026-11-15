@@ -10,6 +10,7 @@ import type {
   AppConfig,
   CalendarEventInput,
   CalendarEventPatch,
+  DraftSuggestionInput,
   FileContentInput,
   PlacementInput,
   TicketInput,
@@ -56,7 +57,14 @@ import {
   unshareProject,
   updateTicket
 } from './api/tickets'
-import { inspectFile, inspectFolder, placeFile, suggestPlacement, uploadFolder } from './api/uploads'
+import {
+  inspectFile,
+  inspectFolder,
+  placeFile,
+  suggestDraftPlacement,
+  suggestPlacement,
+  uploadFolder
+} from './api/uploads'
 import { readConfig, writeConfig } from './config'
 import { clearLayout, loadLayout, saveLayout } from './layout'
 
@@ -123,6 +131,9 @@ export function registerIpc(): void {
   })
   ipcMain.handle('add:suggest', (_event, input: { projectId: string; filePath: string }) =>
     run(() => suggestPlacement(input))
+  )
+  ipcMain.handle('add:suggest-draft', (_event, input: DraftSuggestionInput) =>
+    run(() => suggestDraftPlacement(input))
   )
   ipcMain.handle('add:place', (_event, input: PlacementInput) => run(() => placeFile(input)))
 

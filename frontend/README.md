@@ -152,7 +152,7 @@ src/
 └─ renderer/src/
    ├─ lib/                # focusGraph, treeLayout, markdown, format, errors (pure, unit tested)
    ├─ state/              # useFocusGraph, useProjects, useSearch, useDocument, usePositions, useToasts
-   ├─ components/         # rail, home, project, canvas, nodes, inspector, document sheet, the two flows
+   ├─ components/         # rail, home, project, canvas, nodes, inspector, document sheet + editor, the two flows
    └─ styles/             # tokens.css, app.css
 ```
 
@@ -175,6 +175,15 @@ src/
   Because a save makes **no model call**, a folder's description can lag its documents until
   the next add or placement; search still finds the new words, since it reads the document
   itself.
+- **A document can be written in the app, not only uploaded.** The Add wizard's second entry
+  opens the same markdown editor as the sheet (`components/MarkdownEditor.tsx`, Read/Edit tabs,
+  plain textarea, rendered preview), enforces a markdown name in `lib/documentDraft.ts`
+  (mirroring `graph_add/labels.py`), then posts the text through `add.suggestDraft`. The main
+  process encodes it to the bytes of the same multipart part an upload carries, so nothing
+  touches disk and Graph Add scores, stores and places it exactly as before - same local
+  suggestions, same single description call on placement, same 409/410 handling. A document
+  written this way is opened in the sheet once it lands, and the tickets screen's **Add
+  document** gets the editor too, with the ticket's words steering the ranking.
 - **Search and add are slow on purpose.** Both are real model walks; the UI treats them as
   deliberate actions with progress states rather than typing-time suggestions.
 - **No login screen.** The app speaks to `AUTH_MODE=dev` today; a bearer token can be pasted

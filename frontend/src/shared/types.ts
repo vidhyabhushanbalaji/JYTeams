@@ -520,6 +520,22 @@ export interface PickedFile {
   sizeBytes: number
 }
 
+/**
+ * A document written in the app that does not exist in the graph yet.
+ *
+ * It travels to the same Graph Add endpoint an upload does: the main process turns `text`
+ * into the bytes of a markdown multipart part, so the backend never learns whether the
+ * document came from disk or from the editor.
+ */
+export interface DraftSuggestionInput {
+  projectId: string
+  /** The name to store it under, with a markdown suffix (`release-checklist.md`). */
+  fileName: string
+  text: string
+  /** A ticket's title and description, which may steer the ranking. */
+  context?: string
+}
+
 export interface FolderPreview {
   path: string
   name: string
@@ -567,6 +583,8 @@ export interface JyTeamsApi {
       /** A ticket's title and description, which may steer the ranking. */
       context?: string
     }): Promise<ApiResult<SuggestionAccepted>>
+    /** Rank the folders for a document written in the app (no file on disk). */
+    suggestDraft(input: DraftSuggestionInput): Promise<ApiResult<SuggestionAccepted>>
     place(input: PlacementInput): Promise<ApiResult<PlacementResult>>
   }
   search: {

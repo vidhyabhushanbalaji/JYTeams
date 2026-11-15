@@ -8,7 +8,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 
-import type { ApiResult, Member, Project, Ticket, TicketStatus } from '@shared/types'
+import type { ApiResult, Member, Ticket, TicketStatus } from '@shared/types'
 
 import { describeError } from '../lib/errors'
 import {
@@ -28,7 +28,6 @@ import { useTicketDetail } from '../state/useTicketDetail'
 import { useTickets } from '../state/useTickets'
 import { AddDocumentFlow } from './AddDocumentFlow'
 import { AttachFileDialog } from './AttachFileDialog'
-import { ShareProjectDialog } from './ShareProjectDialog'
 import { TicketComposer } from './TicketComposer'
 import { TicketDetailPanel } from './TicketDetailPanel'
 import { Empty, ErrorBox, Spinner } from './primitives'
@@ -37,7 +36,6 @@ const STATUSES: TicketStatus[] = ['todo', 'in_progress', 'done']
 
 export function TicketsScreen({
   member,
-  members,
   initialTicketId,
   initialProjectId,
   onOpenProject,
@@ -47,8 +45,6 @@ export function TicketsScreen({
   notify
 }: {
   member: Member
-  /** Every name that has signed in — the share dialog offers the ones not yet on a project. */
-  members: Member[]
   /** A ticket a chat mention or a calendar deadline asked to open. */
   initialTicketId?: string | null
   /** The project that ticket belongs to, so the list is filtered to it first. */
@@ -72,7 +68,6 @@ export function TicketsScreen({
   const [composerOpen, setComposerOpen] = useState(false)
   const [uploadOpen, setUploadOpen] = useState(false)
   const [attachOpen, setAttachOpen] = useState(false)
-  const [shareOpen, setShareOpen] = useState(false)
   const appliedInitial = useRef(false)
   const skipReset = useRef(true)
 
@@ -114,10 +109,6 @@ export function TicketsScreen({
   }, [scope, projectId, statusFilter])
 
   const groups = useMemo(() => groupByProject(tickets), [tickets])
-  const selectedProject = useMemo<Project | null>(
-    () => projects.find((project) => project.id === detail?.project_id) ?? null,
-    [projects, detail]
-  )
 
   const runWrite = async <T,>(
     work: () => Promise<ApiResult<T>>,
@@ -397,7 +388,6 @@ export function TicketsScreen({
                     'Document taken off the ticket.'
                   )
                 }}
-                onShareProject={() => setShareOpen(true)}
                 onDiscuss={() => {
                   if (!selected) return
                   onOpenChat(
@@ -489,14 +479,6 @@ export function TicketsScreen({
           }}
         />
       ) : null}
-
-      <ShareProjectDialog
-        open={shareOpen}
-        project={selectedProject}
-        members={members}
-        currentMemberId={member.id}
-        onClose={() => setShareOpen(false)}
-      />
     </div>
   )
 }

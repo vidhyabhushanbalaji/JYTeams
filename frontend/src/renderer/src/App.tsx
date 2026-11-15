@@ -105,7 +105,6 @@ export default function App() {
         ) : view.kind === 'tickets' ? (
           <TicketsScreen
             member={member}
-            members={identity.members}
             initialTicketId={view.ticketId ?? null}
             initialProjectId={view.projectId ?? null}
             onOpenProject={(projectId, focus) => setView({ kind: 'project', projectId, focus })}
