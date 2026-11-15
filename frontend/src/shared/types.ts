@@ -353,18 +353,20 @@ export interface TicketEvent {
 /* ------------------------------------------------------------------- chat */
 
 /** What a chat message may point at. */
-export type MentionKind = 'file' | 'directory' | 'ticket'
+export type MentionKind = 'file' | 'directory' | 'ticket' | 'event'
 
 /** A reference stored with a message (mirrors the backend's MentionOut). */
 export interface ChatMention {
   kind: MentionKind
   id: string
   label: string
-  /** The document's or folder's path; empty for a ticket. */
+  /** The document's or folder's path; empty for a ticket or an event. */
   path: string
   /** The folder a document lives in, so the graph can reveal it directly. */
   directory_path: string
   ticket_number: number | null
+  /** The day a calendar event sits on (`YYYY-MM-DD`), when the mention is an event. */
+  event_day: string | null
 }
 
 export interface ChatMessage {
@@ -395,6 +397,8 @@ export interface MentionTarget {
   path: string
   directory_path: string
   ticket_number: number | null
+  /** The day an event sits on (`YYYY-MM-DD`), when the target is a calendar event. */
+  event_day: string | null
   detail: string
 }
 
@@ -403,6 +407,19 @@ export interface MentionTarget {
 export interface CalendarPerson {
   id: string
   display_name: string
+}
+
+/** A document, folder or ticket an event's notes point at (mirrors EventMentionOut). */
+export interface CalendarMention {
+  kind: Exclude<MentionKind, 'event'>
+  id: string
+  label: string
+  /** The document's or folder's path; empty for a ticket. */
+  path: string
+  /** The folder a document lives in, so the graph can reveal it directly. */
+  directory_path: string
+  /** The ticket's number, when the mention is a ticket. */
+  ticket_number: number | null
 }
 
 /** One thing on a day: an added event, or a ticket's deadline. */
@@ -426,6 +443,8 @@ export interface CalendarItem {
   status: TicketStatus | null
   priority: TicketPriority | null
   assignee: CalendarPerson | null
+  /** Documents, folders and tickets the event's notes mention. */
+  mentions: CalendarMention[]
 }
 
 export interface CalendarRange {
@@ -467,6 +486,8 @@ export interface CalendarEvent {
   created_by: CalendarPerson | null
   created_at: string | null
   updated_at: string | null
+  /** The documents, folders and tickets the notes mention (resolved when it was saved). */
+  mentions: CalendarMention[]
 }
 
 /** A failure normalised by the main process; never thrown across IPC. */
@@ -611,6 +632,18 @@ export interface JyTeamsApi {
     create(input: CalendarEventInput): Promise<ApiResult<CalendarEvent>>
     update(eventId: string, patch: CalendarEventPatch): Promise<ApiResult<CalendarEvent>>
     remove(eventId: string): Promise<ApiResult<null>>
+    /** Documents, folders and tickets an event's notes may mention after an `@`. */
+    mentionTargets(input: {
+      projectId: string
+      query?: string
+      limit?: number
+    }): Promise<ApiResult<MentionTarget[]>>
+    /** The events whose notes mention one document, folder or ticket (a ticket's meetings). */
+    mentioning(input: {
+      projectId: string
+      kind: 'file' | 'directory' | 'ticket'
+      id: string
+    }): Promise<ApiResult<CalendarItem[]>>
   }
 
 }

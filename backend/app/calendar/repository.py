@@ -7,6 +7,7 @@ service (:mod:`app.core.access` and the creator check), never here.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -59,7 +60,15 @@ class CalendarRepository(Protocol):
         self, *, project_ids: list[str], start: datetime, end: datetime
     ) -> list[Row]: ...
 
+    async def list_project_events_all(self, *, project_id: str, limit: int = 500) -> list[Row]: ...
+
     async def get_event(self, event_id: str) -> Row | None: ...
+
+    async def get_events_by_ids(self, event_ids: list[str]) -> list[Row]: ...
+
+    async def list_events_mentioning(
+        self, *, project_id: str, kind: str, target_id: str
+    ) -> list[Row]: ...
 
     async def insert_event(self, payload: Row) -> Row: ...
 
@@ -133,6 +142,61 @@ class SupabaseCalendarRepository:
             )
             rows = response.data or []
             return dict(rows[0]) if rows else None
+
+        return await self._run(run)
+
+    async def list_project_events_all(self, *, project_id: str, limit: int = 500) -> list[Row]:
+        """Every project event, newest last — the pool the `@` picker and mentions search."""
+
+        def run() -> list[Row]:
+            response = (
+                admin_client()
+                .table("calendar_events")
+                .select("*")
+                .eq("project_id", project_id)
+                .order("starts_at")
+                .limit(limit)
+                .execute()
+            )
+            return response.data or []
+
+        return await self._run(run)
+
+    async def get_events_by_ids(self, event_ids: list[str]) -> list[Row]:
+        if not event_ids:
+            return []
+
+        def run() -> list[Row]:
+            response = (
+                admin_client().table("calendar_events").select("*").in_("id", event_ids).execute()
+            )
+            return response.data or []
+
+        return await self._run(run)
+
+    async def list_events_mentioning(
+        self, *, project_id: str, kind: str, target_id: str
+    ) -> list[Row]:
+        """Project events whose resolved mentions include one `(kind, id)`.
+
+        `mentions` is a JSON array, so containment (`cs`) asks the database for the one object
+        rather than filtering every event in Python. The value is passed as a JSON *string*
+        because postgrest's array sanitiser would flatten a list of dicts; a string reaches the
+        operator exactly as written (`cs.[{"kind": …}]`).
+        """
+        wanted = json.dumps([{"kind": kind, "id": target_id}])
+
+        def run() -> list[Row]:
+            response = (
+                admin_client()
+                .table("calendar_events")
+                .select("*")
+                .eq("project_id", project_id)
+                .contains("mentions", wanted)
+                .order("starts_at")
+                .execute()
+            )
+            return response.data or []
 
         return await self._run(run)
 

@@ -13,6 +13,7 @@ import type {
   CalendarEventInput,
   CalendarEventPatch,
   CalendarItem,
+  CalendarMention,
   Member
 } from '@shared/types'
 
@@ -24,7 +25,9 @@ import {
   sortItems,
   timeLabel
 } from '../lib/calendar'
+import { mentionDraft, mentionIcon, mentionOpenHint, plainBody } from '../lib/chat'
 import { describeError } from '../lib/errors'
+import type { GraphFocus } from '../lib/graphFocus'
 import { STATUS_LABEL } from '../lib/tickets'
 import { useCalendar, type CalendarScope } from '../state/useCalendar'
 import { useProjects } from '../state/useProjects'
@@ -33,6 +36,13 @@ import { EventDialog } from './EventDialog'
 import { ErrorBox, Spinner } from './primitives'
 
 const today = new Date()
+
+const parseDay = (iso: string | null | undefined): Date | null => {
+  if (!iso) return null
+  const [year, month, day] = iso.slice(0, 10).split('-').map(Number)
+  if (!year || !month || !day) return null
+  return new Date(year, month - 1, day)
+}
 
 const asEvent = (item: CalendarItem): CalendarEvent => ({
   id: item.id,
@@ -45,22 +55,42 @@ const asEvent = (item: CalendarItem): CalendarEvent => ({
   all_day: item.all_day,
   created_by: item.created_by,
   created_at: null,
-  updated_at: null
+  updated_at: null,
+  mentions: item.mentions
 })
+
+const mentionLabel = (mention: CalendarMention): string =>
+  mention.kind === 'ticket' && mention.ticket_number !== null
+    ? `#${mention.ticket_number} ${mention.label}`
+    : mention.label
 
 export function CalendarScreen({
   member,
+  initialProjectId,
+  initialDay,
   onOpenTicket,
+  onOpenProject,
+  onOpenChat,
   notify
 }: {
   member: Member
+  /** A ticket or a chat mention asked for this project's calendar. */
+  initialProjectId?: string | null
+  /** The day to reveal (`YYYY-MM-DD`), when another screen sent us to an event. */
+  initialDay?: string | null
   onOpenTicket: (projectId: string, ticketId: string) => void
+  onOpenProject: (projectId: string, focus: GraphFocus) => void
+  /** Start a chat message that mentions an event. */
+  onOpenChat: (projectId: string, draft: string) => void
   notify: (message: string, tone?: 'info' | 'error') => void
 }) {
   const { projects } = useProjects()
-  const [scope, setScope] = useState<CalendarScope>({ kind: 'personal' })
-  const [month, setMonth] = useState({ year: today.getFullYear(), month: today.getMonth() })
-  const [selectedDay, setSelectedDay] = useState(isoDay(today))
+  const anchor = parseDay(initialDay) ?? today
+  const [scope, setScope] = useState<CalendarScope>(
+    initialProjectId ? { kind: 'project', projectId: initialProjectId } : { kind: 'personal' }
+  )
+  const [month, setMonth] = useState({ year: anchor.getFullYear(), month: anchor.getMonth() })
+  const [selectedDay, setSelectedDay] = useState(initialDay ?? isoDay(today))
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<CalendarEvent | null>(null)
   const [busy, setBusy] = useState(false)
@@ -69,11 +99,26 @@ export function CalendarScreen({
   const items = calendar.range?.items ?? []
 
   useEffect(() => {
+    if (initialProjectId) setScope({ kind: 'project', projectId: initialProjectId })
+  }, [initialProjectId])
+
+  useEffect(() => {
+    const revealed = parseDay(initialDay)
+    if (!revealed) return
+    setMonth({ year: revealed.getFullYear(), month: revealed.getMonth() })
+  }, [initialDay])
+
+  useEffect(() => {
+    const revealed = parseDay(initialDay)
+    if (revealed && month.year === revealed.getFullYear() && month.month === revealed.getMonth()) {
+      setSelectedDay(isoDay(revealed))
+      return
+    }
     const now = new Date()
     const isCurrentMonth = month.year === now.getFullYear() && month.month === now.getMonth()
     const monthStart = `${month.year}-${`${month.month + 1}`.padStart(2, '0')}-01`
     setSelectedDay(isCurrentMonth ? isoDay(now) : monthStart)
-  }, [month, scope])
+  }, [month, scope, initialDay])
 
   const dayItems = useMemo(
     () => sortItems(items.filter((item) => item.day === selectedDay)),
@@ -127,6 +172,45 @@ export function CalendarScreen({
     await calendar.reload()
   }
 
+  /** A chip in an event's notes opens the document, folder or ticket it points at. */
+  const openMention = (item: CalendarItem, mention: CalendarMention): void => {
+    if (!item.project_id) return
+    if (mention.kind === 'ticket') {
+      onOpenTicket(item.project_id, mention.id)
+      return
+    }
+    if (mention.kind === 'directory') {
+      onOpenProject(item.project_id, {
+        kind: 'directory',
+        label: mention.label,
+        directoryId: mention.id,
+        directoryPath: mention.path
+      })
+      return
+    }
+    onOpenProject(item.project_id, {
+      kind: 'files',
+      label: mention.label,
+      targets: [
+        {
+          fileId: mention.id,
+          directoryPath: mention.directory_path,
+          name: mention.label
+        }
+      ],
+      entryFileId: mention.id
+    })
+  }
+
+  /** Start the project's chat on this event — the composer arrives with its mention in place. */
+  const discuss = (item: CalendarItem): void => {
+    if (!item.project_id) return
+    onOpenChat(
+      item.project_id,
+      mentionDraft({ kind: 'event', id: item.id, label: item.title, ticket_number: null })
+    )
+  }
+
   return (
     <div className="screen screen--wide">
       <div className="screen__inner">
@@ -138,7 +222,10 @@ export function CalendarScreen({
               {scope.kind === 'personal'
                 ? 'your merged calendar'
                 : `${scopeProjectName}'s calendar`}
-              . Ticket deadlines appear on their own, and a finished ticket drops off.
+              . Ticket deadlines appear on their own, and a finished ticket drops off. An event’s
+              notes can mention a document, folder or ticket with @, and{' '}
+              <strong>Message in chat</strong> starts a discussion about the event in the project’s
+              chat.
             </p>
           </div>
           <div className="screen__actions">
@@ -278,7 +365,23 @@ export function CalendarScreen({
                                 .join(' · ')}
                         </span>
                         {item.notes ? (
-                          <span className="cal-day-item__notes">{item.notes}</span>
+                          <span className="cal-day-item__notes">{plainBody(item.notes)}</span>
+                        ) : null}
+                        {item.mentions.length > 0 ? (
+                          <span className="cal-day-item__mentions">
+                            {item.mentions.map((mention) => (
+                              <button
+                                key={`${mention.kind}-${mention.id}`}
+                                type="button"
+                                className={`mention-chip mention-chip--${mention.kind}`}
+                                title={mentionOpenHint(mention.kind)}
+                                onClick={() => openMention(item, mention)}
+                              >
+                                <span aria-hidden="true">{mentionIcon(mention.kind)}</span>
+                                {mentionLabel(mention)}
+                              </button>
+                            ))}
+                          </span>
                         ) : null}
                       </span>
                       <span className="cal-day-item__actions">
@@ -291,6 +394,16 @@ export function CalendarScreen({
                             }
                           >
                             Open ticket
+                          </button>
+                        ) : null}
+                        {item.kind === 'event' && item.project_id ? (
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            onClick={() => discuss(item)}
+                            title="Open the project chat with this event mentioned"
+                          >
+                            Message in chat
                           </button>
                         ) : null}
                         {item.editable ? (

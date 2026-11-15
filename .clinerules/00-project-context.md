@@ -106,15 +106,18 @@ app's tickets page shows that feed.
 
 A project **is** its group chat: `chat_messages.project_id` is the channel, so there is nothing to
 create or backfill, sharing a project joins you to its chat, and access is the same
-`ProjectAccess` check every section uses. A message may mention a document, a folder or a ticket;
-the composer writes `@[label](file|directory|ticket:<uuid>)` into the text and the backend parses
-it, checks every id belongs to *that* project (a foreign one is a `400`), and stores the resolved
-set on the row (`mentions jsonb`, denormalised so a rename cannot break a chip). The desktop app
-polls `GET /api/chat/projects/{id}/messages?after_seq=<last seq>` every ~3 s while the chat is
-visible — there is no socket, no new dependency and no model call. Pressing a chip opens the
-project graph on that file or folder (the directory case of `GraphFocus`), or the tickets screen
-on that ticket. A delete is a soft delete (`[deleted]`) by the author or the project owner, so the
-cursor never gaps.
+`ProjectAccess` check every section uses. A message may mention a document, a folder, a ticket or a
+calendar event; the composer writes `@[label](file|directory|ticket|event:<uuid>)` into the text
+and the backend parses it, checks every id belongs to *that* project (a foreign one is a `400`), and
+stores the resolved set on the row (`mentions jsonb`, denormalised so a rename cannot break a chip).
+`app/core/mentions.py` holds the marker grammar (the calendar's event notes write the same syntax;
+`app/chat/mentions.py` is just chat's import site). The desktop app polls
+`GET /api/chat/projects/{id}/messages?after_seq=<last seq>` every ~3 s while the chat is visible —
+there is no socket, no new dependency and no model call. Pressing a chip opens the project graph on
+that file or folder (the directory case of `GraphFocus`), the tickets screen on that ticket, or the
+calendar on that event's day. The reverse direction exists too: a calendar event's **Message in
+chat** and a ticket's **Discuss in chat** open the composer with the matching marker pre-filled.
+A delete is a soft delete (`[deleted]`) by the author or the project owner, so the cursor never gaps.
 
 ## Calendar, in one paragraph
 
@@ -123,8 +126,14 @@ project's events plus **every** ticket deadline in it; the individual calendar
 (`GET /api/calendar/personal`) merges every project the caller is in — their personal events,
 those projects' events, and **only the deadlines of tickets assigned to them**. An event with
 `project_id` is a project event (all members see it, only its creator may edit or delete it);
-without one it is personal. Deadlines are never copied into a calendar table: they are read from
-`tickets.due_date` through `app/tickets/public.py` on every request, so a ticket edit moves its
+without one it is personal. An event's `notes` may mention a document, a folder or a ticket with the
+same `@[label](kind:id)` markers chat uses: they are validated against the event's project when it
+is written, stored resolved on the row (`calendar_events.mentions`, migration 0007) and drawn as
+chips; `GET /projects/{id}/mention-targets` feeds the picker and
+`GET /projects/{id}/mentioning/{kind}/{target_id}` is what a ticket panel reads to list the events
+that mention it. `app/calendar/public.py` exposes events as mention targets to chat, and is the only
+module another section may import. Deadlines are never copied into a calendar table: they are read
+from `tickets.due_date` through `app/tickets/public.py` on every request, so a ticket edit moves its
 deadline immediately and a `done` ticket stops appearing. Items sit on the day they start, all-day
 events are stored at UTC midnight so their day is timezone-stable, and no model is called.
 
@@ -194,12 +203,15 @@ API docs: <http://localhost:8000/docs> · health: <http://localhost:8000/health>
   `ScoreConfig.version` when ranking changes, and `DISTILLER_VERSION` when the prompt or the
   distiller changes.
 - **Chat and Calendar are designed and built and call no model.** Read `backend/README.md` ("Chat
-  endpoints", "Calendar endpoints") before touching them. Chat resolves and validates mention ids
-  against the message's project at post time (never trust a client-sent label) and keeps deleted
-  rows so the `seq` poll cursor never gaps. The calendar never copies a deadline: it reads
-  `tickets.due_date` through `app/tickets/public.py`, and only `ProjectAccess` decides who sees
-  which project event. Both use the agreed public modules — `app/graph_creation/public.py`,
-  `app/tickets/public.py` — instead of another section's internals.
+  endpoints", "Calendar endpoints") before touching them. The `@` marker grammar is shared
+  (`app/core/mentions.py`); chat resolves and validates mention ids against the message's project
+  at post time (never trust a client-sent label) and keeps deleted rows so the `seq` poll cursor
+  never gaps. An event's notes use the same markers, validated against the event's project and
+  stored resolved in `calendar_events.mentions`, so a ticket can list the events that mention it.
+  Cross-section reads go through the agreed public modules — `app/calendar/public.py` (events as
+  mention targets), `app/graph_creation/public.py`, `app/tickets/public.py` — never another
+  section's internals. The calendar never copies a deadline: it reads `tickets.due_date` through
+  `app/tickets/public.py`, and only `ProjectAccess` decides who sees which project event.
 - **Membership is decided in `app/core/access.py`.** Sections ask `ProjectAccess` for the
   caller's role; `projects.owner_id` is only the creator. Do not reintroduce `owner_id`
   comparisons for access, and do not give another section its own sharing rules.

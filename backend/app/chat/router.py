@@ -89,7 +89,7 @@ async def delete_message(message_id: str, user: UserDep, service: ServiceDep) ->
 @router.get(
     "/projects/{project_id}/mention-targets",
     response_model=list[MentionTargetOut],
-    summary="Documents, folders and tickets the composer may offer after an @",
+    summary="Documents, folders, tickets and calendar events the composer may offer after an @",
 )
 async def mention_targets(
     project_id: str,

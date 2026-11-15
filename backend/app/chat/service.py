@@ -32,7 +32,7 @@ MAX_TARGETS = 20
 
 
 class MentionCatalogue(Protocol):
-    """What chat needs from the sections that own documents, folders and tickets."""
+    """What chat needs from the sections that own documents, folders, tickets and events."""
 
     async def search(self, *, project_id: str, query: str, limit: int) -> list[dict[str, Any]]: ...
 
@@ -55,6 +55,7 @@ def _mention_out(value: Mapping[str, Any]) -> dict[str, Any]:
         "path": str(value.get("path") or ""),
         "directory_path": str(value.get("directory_path") or ""),
         "ticket_number": value.get("ticket_number"),
+        "event_day": value.get("event_day"),
     }
 
 
@@ -187,7 +188,7 @@ class ChatService:
     async def mention_targets(
         self, *, member_id: str, project_id: str, query: str, limit: int = MAX_TARGETS
     ) -> list[dict[str, Any]]:
-        """What the composer may offer after an `@`: documents, folders and tickets."""
+        """What the composer may offer after an `@`: documents, folders, tickets and events."""
         await self._access.require(project_id, member_id)
         cleaned = " ".join((query or "").split())[:120]
         rows = await self._catalogue.search(
@@ -201,6 +202,7 @@ class ChatService:
                 "path": str(row.get("path") or ""),
                 "directory_path": str(row.get("directory_path") or ""),
                 "ticket_number": row.get("ticket_number"),
+                "event_day": row.get("event_day"),
                 "detail": str(row.get("detail") or ""),
             }
             for row in rows

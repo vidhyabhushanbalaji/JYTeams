@@ -6,43 +6,44 @@
  * pressing a chip opens the graph at that file/folder, or the tickets screen at that ticket.
  */
 
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
-import type { ChatMention, ChatChannel, Member, MentionTarget } from '@shared/types'
+import type { ChatMention, ChatChannel, Member } from '@shared/types'
 
-import { dayLabel, groupByDay, mentionMarker, mentionQueryAt, messagePreview } from '../lib/chat'
+import { dayLabel, groupByDay, messagePreview } from '../lib/chat'
 import { describeError } from '../lib/errors'
 import { focusFromMention, type GraphFocus } from '../lib/graphFocus'
 import { initials, relativeTime } from '../lib/tickets'
 import { useChat } from '../state/useChat'
 import { useChatChannels } from '../state/useChatChannels'
-import { useMentionTargets } from '../state/useMentionTargets'
 import { ChatMessageRow } from './ChatMessageRow'
-import { MentionPicker } from './MentionPicker'
+import { MentionTextarea } from './MentionTextarea'
 import { Empty, ErrorBox, Spinner } from './primitives'
 
 export function ChatScreen({
   member,
   initialProjectId,
+  initialDraft,
   onOpenProject,
   onOpenTicket,
+  onOpenCalendar,
   notify
 }: {
   member: Member
   /** A chat mention elsewhere asked for this project's chat. */
   initialProjectId?: string | null
+  /** A pre-filled message another screen started (a calendar event or a ticket). */
+  initialDraft?: string | null
   onOpenProject: (projectId: string, focus: GraphFocus) => void
   onOpenTicket: (projectId: string, ticketId: string) => void
+  onOpenCalendar: (projectId: string, eventId: string, eventDay: string | null) => void
   notify: (message: string, tone?: 'info' | 'error') => void
 }) {
   const { channels, loading: channelsLoading, error: channelsError, reload: reloadChannels } =
     useChatChannels()
   const [selectedId, setSelectedId] = useState<string | null>(initialProjectId ?? null)
-  const [text, setText] = useState('')
-  const [caret, setCaret] = useState(0)
-  const [pickerDismissed, setPickerDismissed] = useState(false)
-  const [active, setActive] = useState(0)
-  const inputRef = useRef<HTMLTextAreaElement | null>(null)
+  const [text, setText] = useState(initialDraft ?? '')
+  const [focusKey, setFocusKey] = useState(0)
   const listRef = useRef<HTMLDivElement | null>(null)
 
   const selected = useMemo(
@@ -61,12 +62,12 @@ export function ChatScreen({
     if (channels.length > 0) setSelectedId(channels[0].project_id)
   }, [channels, selectedId])
 
-  const query = pickerDismissed ? null : mentionQueryAt(text, caret)
-  const mention = useMentionTargets(projectId, query?.query ?? '', query !== null)
-
+  // A screen that starts a message (a calendar event, a ticket) hands us its draft here: fill the
+  // composer and put the caret at the end so the next keystroke continues the sentence.
   useEffect(() => {
-    setActive(0)
-  }, [mention.targets])
+    setText(initialDraft ?? '')
+    setFocusKey((value) => value + 1)
+  }, [initialDraft, initialProjectId])
 
   useEffect(() => {
     if (chat.error) notify(describeError(chat.error), 'error')
@@ -79,67 +80,13 @@ export function ChatScreen({
 
   const days = useMemo(() => groupByDay(chat.messages), [chat.messages])
 
-  const changeText = (value: string, nextCaret: number): void => {
-    setText(value)
-    setCaret(nextCaret)
-    setPickerDismissed(false)
-  }
-
-  const pick = (target: MentionTarget): void => {
-    if (!query) return
-    const marker = mentionMarker({ kind: target.kind, id: target.id, label: target.label })
-    const before = text.slice(0, query.start)
-    const after = text.slice(caret)
-    const next = `${before}${marker} ${after}`
-    const position = before.length + marker.length + 1
-    setText(next)
-    setCaret(position)
-    setPickerDismissed(true)
-    requestAnimationFrame(() => {
-      const input = inputRef.current
-      if (!input) return
-      input.focus()
-      input.setSelectionRange(position, position)
-    })
-  }
-
   const submit = async (): Promise<void> => {
     const body = text.trim()
     if (!body || chat.sending || !projectId) return
     const ok = await chat.send(body)
     if (ok) {
       setText('')
-      setCaret(0)
-      setPickerDismissed(true)
       void reloadChannels()
-    }
-  }
-
-  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
-    if (query && mention.targets.length > 0) {
-      if (event.key === 'ArrowDown') {
-        event.preventDefault()
-        setActive((current) => (current + 1) % mention.targets.length)
-        return
-      }
-      if (event.key === 'ArrowUp') {
-        event.preventDefault()
-        setActive((current) => (current - 1 + mention.targets.length) % mention.targets.length)
-        return
-      }
-      if (event.key === 'Enter' || event.key === 'Tab') {
-        event.preventDefault()
-        pick(mention.targets[active])
-        return
-      }
-      if (event.key === 'Escape') {
-        setPickerDismissed(true)
-        return
-      }
-    }
-    if (event.key === 'Enter' && !event.shiftKey) {
-      event.preventDefault()
-      void submit()
     }
   }
 
@@ -151,6 +98,7 @@ export function ChatScreen({
       return
     }
     if (item.kind === 'ticket') onOpenTicket(projectId, item.id)
+    if (item.kind === 'event') onOpenCalendar(projectId, item.id, item.event_day)
   }
 
   const remove = async (messageId: string): Promise<void> => {
@@ -167,7 +115,8 @@ export function ChatScreen({
             <h1 className="screen__title">Chat</h1>
             <p className="screen__lede">
               One group chat per project, for everyone who can see it. Type <strong>@</strong> to
-              point at a document, a folder or a ticket — pressing the chip opens it.
+              point at a document, a folder, a ticket or a calendar event — pressing the chip opens
+              it.
             </p>
           </div>
           <div className="screen__actions">
@@ -222,7 +171,6 @@ export function ChatScreen({
                       onClick={() => {
                         setSelectedId(channel.project_id)
                         setText('')
-                        setPickerDismissed(true)
                       }}
                     >
                       <span className="avatar avatar--sm" aria-hidden="true">
@@ -247,8 +195,8 @@ export function ChatScreen({
               <header className="chat__head">
                 <span className="chat__title">{selected?.project_name ?? 'Chat'}</span>
                 <span className="chat__hint">
-                  Everyone in this project sees this chat. Type @ to mention a document, folder or
-                  ticket.
+                  Everyone in this project sees this chat. Type @ to mention a document, folder,
+                  ticket or calendar event.
                 </span>
               </header>
 
@@ -296,30 +244,17 @@ export function ChatScreen({
               </div>
 
               <div className="chat-composer">
-                {query && projectId ? (
-                  <MentionPicker
-                    targets={mention.targets}
-                    loading={mention.loading}
-                    active={active}
-                    error={mention.error}
-                    onHover={setActive}
-                    onPick={pick}
-                  />
-                ) : null}
-
-                <textarea
-                  ref={inputRef}
-                  className="chat-composer__input"
+                <MentionTextarea
+                  projectId={projectId}
                   value={text}
-                  placeholder="Message the project. Type @ to mention a document, folder or ticket."
+                  onChange={(next) => setText(next)}
                   rows={2}
                   maxLength={4_000}
-                  onChange={(event) =>
-                    changeText(event.target.value, event.target.selectionStart ?? 0)
-                  }
-                  onKeyDown={onKeyDown}
-                  onClick={(event) => setCaret(event.currentTarget.selectionStart ?? 0)}
-                  onKeyUp={(event) => setCaret(event.currentTarget.selectionStart ?? 0)}
+                  className="chat-composer__input"
+                  placeholder="Message the project. Type @ to mention a document, folder, ticket or calendar event."
+                  pickerTitle="Mention a document, a folder, a ticket or a calendar event"
+                  focusKey={focusKey}
+                  onSubmit={() => void submit()}
                 />
 
                 <div className="chat-composer__foot">

@@ -132,6 +132,7 @@ class FakeMentionCatalogue:
         path: str = "",
         directory_path: str = "",
         ticket_number: int | None = None,
+        event_day: str | None = None,
     ) -> dict[str, Any]:
         target = {
             "kind": kind,
@@ -140,6 +141,7 @@ class FakeMentionCatalogue:
             "path": path,
             "directory_path": directory_path,
             "ticket_number": ticket_number,
+            "event_day": event_day,
             "detail": kind,
             "project_id": project_id,
         }

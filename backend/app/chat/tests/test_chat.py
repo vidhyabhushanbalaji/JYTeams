@@ -33,6 +33,26 @@ async def test_a_message_is_stored_with_its_resolved_mentions(service: ChatServi
     assert message["deleted"] is False
 
 
+async def test_an_event_mention_carries_the_day_it_sits_on(service: ChatService, world) -> None:
+    body = f"notes from {marker('event', world.event['id'], 'Kickoff')}"
+
+    message = await _post(service, world, body)
+
+    assert [item["kind"] for item in message["mentions"]] == ["event"]
+    assert message["mentions"][0]["event_day"] == "2026-03-03"
+    assert message["mentions"][0]["label"] == "Kickoff"
+
+
+async def test_an_event_from_another_project_is_refused(service: ChatService, world) -> None:
+    other = world.repository.seed_project("Other", world.ada["id"])
+    foreign = world.catalogue.seed_target(other["id"], kind="event", label="Elsewhere")
+
+    with pytest.raises(HTTPException) as error:
+        await _post(service, world, f"see {marker('event', foreign['id'], 'Elsewhere')}")
+
+    assert error.value.status_code == 400
+
+
 async def test_a_duplicate_mention_is_stored_once(service: ChatService, world) -> None:
     same = marker("file", world.auth["id"], "auth.md")
 
@@ -161,7 +181,12 @@ async def test_mention_targets_are_scoped_to_the_project(service: ChatService, w
         member_id=world.ada["id"], project_id=world.project["id"], query=""
     )
 
-    assert {row["label"] for row in rows} == {"auth.md", "guides", "Fix the login redirect"}
+    assert {row["label"] for row in rows} == {
+        "auth.md",
+        "guides",
+        "Fix the login redirect",
+        "Kickoff",
+    }
     assert world.catalogue.searches == [(world.project["id"], "")]
 
 

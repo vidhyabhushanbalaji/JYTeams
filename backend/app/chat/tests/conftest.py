@@ -50,6 +50,9 @@ def world(repository: InMemoryChatRepository, catalogue: FakeMentionCatalogue) -
     ticket = catalogue.seed_target(
         project["id"], kind="ticket", label="Fix the login redirect", ticket_number=12
     )
+    event = catalogue.seed_target(
+        project["id"], kind="event", label="Kickoff", event_day="2026-03-03"
+    )
     return SimpleNamespace(
         repository=repository,
         catalogue=catalogue,
@@ -59,4 +62,5 @@ def world(repository: InMemoryChatRepository, catalogue: FakeMentionCatalogue) -
         guides=guides,
         auth=auth,
         ticket=ticket,
+        event=event,
     )

@@ -11,7 +11,7 @@ export type ChatSegment =
   | { kind: 'text'; text: string }
   | { kind: 'mention'; mention: ChatMention; raw: string }
 
-const MARKER = /@\[([^[\]\n]{1,120})\]\((file|directory|ticket):([^()\s]{1,64})\)/g
+const MARKER = /@\[([^[\]\n]{1,120})\]\((file|directory|ticket|event):([^()\s]{1,64})\)/g
 
 export const mentionMarker = (
   target: Pick<MentionTarget, 'kind' | 'id' | 'label'>
@@ -70,14 +70,47 @@ export function mentionText(mention: ChatMention): string {
 }
 
 export const mentionIcon = (kind: MentionKind): string =>
-  kind === 'file' ? '\u{1F4C4}' : kind === 'directory' ? '\u{1F4C1}' : '\u{1F3AB}'
+  kind === 'file'
+    ? '\u{1F4C4}'
+    : kind === 'directory'
+      ? '\u{1F4C1}'
+      : kind === 'ticket'
+        ? '\u{1F3AB}'
+        : '\u{1F4C5}'
+
+/** What pressing a chip does, in the chip's tooltip. */
+export const mentionOpenHint = (kind: MentionKind): string =>
+  kind === 'ticket'
+    ? 'Open this ticket'
+    : kind === 'event'
+      ? 'Open this event on the calendar'
+      : 'Open this in the project graph'
+
+/**
+ * The marker another screen pre-fills when it starts a message about something.
+ *
+ * A ticket keeps its number in the text the reader sees (`#12 Fix it`); the backend resolves the
+ * rest and the chip adds the number back through :func:`mentionText`.
+ */
+export function mentionDraft(
+  target: Pick<ChatMention, 'kind' | 'id' | 'label' | 'ticket_number'>
+): string {
+  const label =
+    target.kind === 'ticket' && target.ticket_number !== null
+      ? `#${target.ticket_number} ${target.label}`
+      : target.label
+  return `${mentionMarker({ kind: target.kind, id: target.id, label })} `
+}
+
+/** A body with every marker turned into `@label` — for text drawn without chips. */
+export const plainBody = (body: string): string =>
+  body.replace(MARKER, (_match, label: string) => `@${label}`)
 
 /** A one-line preview for the channel list: markers become `@name`. */
 export function messagePreview(message: ChatMessage | null, limit = 80): string {
   if (!message) return 'No messages yet'
   if (message.deleted) return 'Message removed'
-  const text = message.body.replace(MARKER, (_match, label: string) => `@${label}`)
-  const flat = text.replace(/\s+/g, ' ').trim()
+  const flat = plainBody(message.body).replace(/\s+/g, ' ').trim()
   return flat.length > limit ? `${flat.slice(0, limit - 1)}\u2026` : flat
 }
 

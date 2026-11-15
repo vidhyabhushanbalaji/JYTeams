@@ -6,11 +6,14 @@ import {
   dayLabel,
   groupByDay,
   lastSeq,
+  mentionDraft,
+  mentionIcon,
   mentionMarker,
   mentionQueryAt,
   mentionText,
   mergeMessages,
   messagePreview,
+  plainBody,
   segmentsOf
 } from './chat'
 
@@ -20,7 +23,8 @@ const mention = {
   label: 'auth.md',
   path: 'guides/auth.md',
   directory_path: 'guides',
-  ticket_number: null
+  ticket_number: null,
+  event_day: null
 }
 
 function message(overrides: Partial<ChatMessage>): ChatMessage {
@@ -64,11 +68,37 @@ describe('chat markers', () => {
     ).toBe('#12 Fix it')
     expect(mentionText(mention)).toBe('auth.md')
   })
+
+  it('resolves an event marker like every other kind', () => {
+    const event = {
+      ...mention,
+      kind: 'event' as const,
+      id: 'e-1',
+      label: 'Kickoff',
+      path: '',
+      directory_path: '',
+      event_day: '2026-03-03'
+    }
+    const segments = segmentsOf({ body: 'notes from @[Kickoff](event:e-1)', mentions: [event] })
+
+    expect(segments[1]).toMatchObject({ mention: { kind: 'event', event_day: '2026-03-03' } })
+    expect(mentionIcon('event')).toBe('\u{1F4C5}')
+  })
+
+  it('writes the draft another screen pre-fills', () => {
+    expect(
+      mentionDraft({ kind: 'event', id: 'e-1', label: 'Kickoff', ticket_number: null })
+    ).toBe('@[Kickoff](event:e-1) ')
+    expect(
+      mentionDraft({ kind: 'ticket', id: 't-1', label: 'Fix it', ticket_number: 12 })
+    ).toBe('@[#12 Fix it](ticket:t-1) ')
+  })
 })
 
 describe('message previews and grouping', () => {
   it('turns markers into @names and bounds the length', () => {
     expect(messagePreview(message({ body: 'read @[auth.md](file:f-1) now' }))).toBe('read @auth.md now')
+    expect(plainBody('see @[auth.md](file:f-1)')).toBe('see @auth.md')
     expect(messagePreview(message({ body: 'x'.repeat(200) }), 10)).toHaveLength(10)
     expect(messagePreview(message({ deleted: true }))).toBe('Message removed')
     expect(messagePreview(null)).toBe('No messages yet')

@@ -7,7 +7,7 @@
 
 import type { ChatMention, ChatMessage } from '@shared/types'
 
-import { mentionIcon, mentionText, segmentsOf } from '../lib/chat'
+import { mentionIcon, mentionOpenHint, mentionText, segmentsOf } from '../lib/chat'
 import { initials, relativeTime } from '../lib/tickets'
 
 export function ChatMessageRow({
@@ -61,11 +61,7 @@ export function ChatMessageRow({
                   type="button"
                   className={`mention-chip mention-chip--${segment.mention.kind}`}
                   onClick={() => onOpenMention(segment.mention)}
-                  title={
-                    segment.mention.kind === 'ticket'
-                      ? 'Open this ticket'
-                      : 'Open this in the project graph'
-                  }
+                  title={mentionOpenHint(segment.mention.kind)}
                 >
                   <span aria-hidden="true">{mentionIcon(segment.mention.kind)}</span>
                   {mentionText(segment.mention)}

@@ -11,6 +11,7 @@ export function MentionPicker({
   loading,
   active,
   error,
+  title = 'Mention a document, a folder, a ticket or a calendar event',
   onHover,
   onPick
 }: {
@@ -18,13 +19,15 @@ export function MentionPicker({
   loading: boolean
   active: number
   error: ApiError | null
+  /** What this picker offers; screens word it for their own scope. */
+  title?: string
   onHover: (index: number) => void
   onPick: (target: MentionTarget) => void
 }) {
   return (
-    <div className="mention-picker" role="listbox" aria-label="Mention something in this project">
+    <div className="mention-picker" role="listbox" aria-label={title}>
       <span className="mention-picker__title">
-        Mention a document, a folder or a ticket
+        {title}
         {loading ? <Spinner label="Searching" /> : null}
       </span>
 
@@ -51,7 +54,9 @@ export function MentionPicker({
               <span className="mention-option__body">
                 <span className="mention-option__label">{target.label}</span>
                 <span className="mention-option__detail">
-                  {target.kind === 'ticket' ? target.detail : target.path || target.detail}
+                  {target.kind === 'ticket' || target.kind === 'event'
+                    ? target.detail
+                    : target.path || target.detail}
                 </span>
               </span>
             </button>

@@ -10,6 +10,11 @@ Deadlines are never stored here. They are read through
 :mod:`app.tickets.public` on every request, so a ticket edited in the tickets screen moves on the
 calendar immediately, and a completed ticket drops off it.
 
+An event's notes may mention a document, a folder or a ticket, using the same
+``@[label](kind:id)`` markers chat writes. They are parsed and validated against the event's
+project when the event is written, then stored resolved on the row — so the calendar, chat, and a
+ticket's "on the calendar" list all read the same facts.
+
 Items sit on the day they start; a multi-day event appears on its first day.
 """
 
@@ -25,11 +30,18 @@ from fastapi import HTTPException, status
 from app.calendar.repository import CalendarRepository, Row
 from app.calendar.schemas import MAX_RANGE_DAYS, EventIn, EventPatch
 from app.core.access import ProjectAccess
+from app.core.mentions import MAX_MENTIONS, Mention, extract
 
 logger = logging.getLogger(__name__)
 
 EVENT = "event"
 DEADLINE = "deadline"
+
+#: The mention kinds an event's notes may point at (an event does not mention another event).
+MENTIONABLE_KINDS: tuple[str, ...] = ("file", "directory", "ticket")
+
+#: What one picker query may return.
+MAX_TARGETS = 20
 
 
 class DeadlineSource(Protocol):
@@ -43,6 +55,16 @@ class DeadlineSource(Protocol):
         start: date,
         end: date,
     ) -> list[dict[str, Any]]: ...
+
+
+class MentionCatalogue(Protocol):
+    """What the calendar needs from the sections that own documents, folders and tickets."""
+
+    async def search(self, *, project_id: str, query: str, limit: int) -> list[dict[str, Any]]: ...
+
+    async def describe(
+        self, *, project_id: str, mentions: Sequence[Mention]
+    ) -> dict[tuple[str, str], dict[str, Any]]: ...
 
 
 def _person(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -77,15 +99,40 @@ def _as_date(value: Any) -> date | None:
     return None
 
 
+def _mentions_of(row: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """A row's resolved mentions, normalised for the response and for chat's use."""
+    mentions: list[dict[str, Any]] = []
+    for item in row.get("mentions") or []:
+        if not isinstance(item, Mapping):
+            continue
+        mentions.append(
+            {
+                "kind": str(item.get("kind") or ""),
+                "id": str(item.get("id") or ""),
+                "label": str(item.get("label") or "item"),
+                "path": str(item.get("path") or ""),
+                "directory_path": str(item.get("directory_path") or ""),
+                "ticket_number": item.get("ticket_number"),
+            }
+        )
+    return mentions
+
+
 class CalendarService:
     """Events and ticket deadlines, per project and per person."""
 
     def __init__(
-        self, *, repository: CalendarRepository, access: ProjectAccess, deadlines: DeadlineSource
+        self,
+        *,
+        repository: CalendarRepository,
+        access: ProjectAccess,
+        deadlines: DeadlineSource,
+        catalogue: MentionCatalogue,
     ) -> None:
         self._repository = repository
         self._access = access
         self._deadlines = deadlines
+        self._catalogue = catalogue
 
     # ---------------------------------------------------------------- reading
 
@@ -162,12 +209,16 @@ class CalendarService:
         if project_id:
             await self._access.require(project_id, member_id)
 
+        notes = (payload.notes or "")[:2_000]
+        mentions = await self._resolve_notes(project_id, notes)
+
         row = await self._repository.insert_event(
             {
                 "project_id": project_id,
                 "member_id": member_id,
                 "title": title[:200],
-                "notes": (payload.notes or "")[:2_000],
+                "notes": notes,
+                "mentions": mentions,
                 "starts_at": payload.starts_at.isoformat(),
                 "ends_at": payload.ends_at.isoformat() if payload.ends_at else None,
                 "all_day": payload.all_day,
@@ -183,8 +234,9 @@ class CalendarService:
         """Edit an event. Only the person who added it may change it."""
         row = await self._require_event(event_id)
         self._require_creator(row, member_id)
-        if row.get("project_id"):
-            await self._access.require(str(row["project_id"]), member_id)
+        project_id = str(row["project_id"]) if row.get("project_id") else None
+        if project_id:
+            await self._access.require(project_id, member_id)
 
         supplied = payload.supplied()
         fields: dict[str, Any] = {}
@@ -197,7 +249,10 @@ class CalendarService:
                 )
             fields["title"] = title[:200]
         if "notes" in supplied:
-            fields["notes"] = (payload.notes or "")[:2_000]
+            notes = (payload.notes or "")[:2_000]
+            fields["notes"] = notes
+            # The notes changed, so the resolved set must be rebuilt from the new markers.
+            fields["mentions"] = await self._resolve_notes(project_id, notes)
         if "starts_at" in supplied and payload.starts_at is not None:
             fields["starts_at"] = payload.starts_at.isoformat()
         if "ends_at" in supplied:
@@ -206,7 +261,7 @@ class CalendarService:
             fields["all_day"] = payload.all_day
 
         if not fields:
-            ids = [str(row["project_id"])] if row.get("project_id") else []
+            ids = [project_id] if project_id else []
             return _event_out(row, await self._project_names(ids), await self._authors([row], []))
 
         starts = _as_datetime(fields.get("starts_at", row.get("starts_at")))
@@ -229,7 +284,92 @@ class CalendarService:
         self._require_creator(row, member_id)
         await self._repository.delete_event(event_id)
 
+    # --------------------------------------------------------------- mentions
+
+    async def mention_targets(
+        self, *, member_id: str, project_id: str, query: str, limit: int = MAX_TARGETS
+    ) -> list[dict[str, Any]]:
+        """What an event's notes may offer after an `@`: documents, folders and tickets."""
+        await self._access.require(project_id, member_id)
+        cleaned = " ".join((query or "").split())[:120]
+        rows = await self._catalogue.search(
+            project_id=project_id, query=cleaned, limit=max(1, min(limit, 50))
+        )
+        return [
+            {
+                "kind": str(row.get("kind") or ""),
+                "id": str(row.get("id") or ""),
+                "label": str(row.get("label") or "item"),
+                "path": str(row.get("path") or ""),
+                "directory_path": str(row.get("directory_path") or ""),
+                "ticket_number": row.get("ticket_number"),
+                "detail": str(row.get("detail") or ""),
+            }
+            for row in rows
+        ]
+
+    async def events_mentioning(
+        self, *, member_id: str, project_id: str, kind: str, target_id: str
+    ) -> list[dict[str, Any]]:
+        """Project events whose notes mention one document, folder or ticket.
+
+        This is what a ticket's panel reads to show the meetings it is discussed in; it is a
+        plain read of the resolved mentions, so no model is called.
+        """
+        await self._access.require(project_id, member_id)
+        if kind not in MENTIONABLE_KINDS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"an event can mention: {', '.join(MENTIONABLE_KINDS)}",
+            )
+        rows = await self._repository.list_events_mentioning(
+            project_id=project_id, kind=kind, target_id=target_id
+        )
+        names = await self._project_names([project_id])
+        authors = await self._authors(rows, [])
+        items = [_event_item(row, member_id, names, authors) for row in rows]
+        items.sort(key=lambda item: (item["day"], item["title"].casefold()))
+        return items
+
     # --------------------------------------------------------------- internals
+
+    async def _resolve_notes(self, project_id: str | None, notes: str) -> list[dict[str, Any]]:
+        """Parse an event's notes and resolve every mention inside its project.
+
+        A personal event has no project to check a mention against, so markers there stay plain
+        text and nothing is stored; a project event refuses a marker that is not part of it.
+        """
+        mentions = extract(notes)
+        if not mentions:
+            return []
+        if project_id is None:
+            return []
+        if len(mentions) > MAX_MENTIONS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"an event's notes may mention at most {MAX_MENTIONS} things",
+            )
+
+        found = await self._catalogue.describe(project_id=project_id, mentions=mentions)
+        missing = [
+            f"{mention.kind}:{mention.id}" for mention in mentions if mention.key not in found
+        ]
+        if missing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="these mentions are not part of this project: " + ", ".join(sorted(missing)),
+            )
+        return [
+            {
+                "kind": str(found[mention.key].get("kind") or mention.kind),
+                "id": str(found[mention.key].get("id") or mention.id),
+                "label": str(found[mention.key].get("label") or mention.label),
+                "path": str(found[mention.key].get("path") or ""),
+                "directory_path": str(found[mention.key].get("directory_path") or ""),
+                "ticket_number": found[mention.key].get("ticket_number"),
+            }
+            for mention in mentions
+        ]
 
     async def _require_event(self, event_id: str) -> Row:
         row = await self._repository.get_event(event_id)
@@ -308,6 +448,7 @@ def _event_item(
         "status": None,
         "priority": None,
         "assignee": None,
+        "mentions": _mentions_of(row),
     }
 
 
@@ -337,6 +478,7 @@ def _deadline_item(
         "status": row.get("status"),
         "priority": row.get("priority"),
         "assignee": _person(authors.get(assignee_id)),
+        "mentions": [],
     }
 
 
@@ -358,6 +500,7 @@ def _event_out(
         "created_by": _person(authors.get(creator)),
         "created_at": _as_datetime(row.get("created_at")),
         "updated_at": _as_datetime(row.get("updated_at")),
+        "mentions": _mentions_of(row),
     }
 
 

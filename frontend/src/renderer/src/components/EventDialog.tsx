@@ -10,6 +10,7 @@ import { useEffect, useState } from 'react'
 import type { CalendarEvent, CalendarEventInput, CalendarEventPatch } from '@shared/types'
 
 import { Dialog, Field } from './primitives'
+import { MentionTextarea } from './MentionTextarea'
 
 const pad = (value: number): string => `${value}`.padStart(2, '0')
 
@@ -188,13 +189,23 @@ export function EventDialog({
         </div>
       )}
 
-      <Field label="Notes" hint="Optional">
-        <textarea
-          className="field__input"
-          rows={3}
+      <Field
+        label="Notes"
+        hint={belongsToProject ? 'Type @ to mention a document, folder or ticket' : 'Optional'}
+      >
+        <MentionTextarea
+          projectId={belongsToProject ? (event?.project_id ?? projectId) : null}
           value={notes}
-          onChange={(input) => setNotes(input.target.value)}
+          onChange={(next) => setNotes(next)}
+          rows={3}
           maxLength={2_000}
+          placeholder={
+            belongsToProject
+              ? 'What is this about? Type @ to mention a document, folder or ticket.'
+              : 'What is this about?'
+          }
+          pickerTitle="Mention a document, a folder or a ticket"
+          className="field__input field__input--area"
         />
       </Field>
     </Dialog>

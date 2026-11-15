@@ -20,8 +20,9 @@ written; anything new still gets agreed first, one section at a time.
 root `README.md` and `.gitignore`.
 
 **Agreed interfaces between sections:** `backend/app/graph_ai_search/public.py`,
-`backend/app/graph_creation/public.py` (document/folder mention targets) and
-`backend/app/tickets/public.py` (ticket mention targets and ticket deadlines). Chat and the
+`backend/app/graph_creation/public.py` (document/folder mention targets),
+`backend/app/tickets/public.py` (ticket mention targets and ticket deadlines) and
+`backend/app/calendar/public.py` (calendar events as mention targets, for chat). Chat and the
 calendar import only these; changing their signatures is a cross-section change.
 
 ## Rules

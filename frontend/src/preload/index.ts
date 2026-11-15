@@ -87,7 +87,9 @@ const api: JyTeamsApi = {
     project: (input) => ipcRenderer.invoke('calendar:project', input),
     create: (input) => ipcRenderer.invoke('calendar:create', input),
     update: (eventId: string, patch) => ipcRenderer.invoke('calendar:update', eventId, patch),
-    remove: (eventId: string) => ipcRenderer.invoke('calendar:delete', eventId)
+    remove: (eventId: string) => ipcRenderer.invoke('calendar:delete', eventId),
+    mentionTargets: (input) => ipcRenderer.invoke('calendar:mention-targets', input),
+    mentioning: (input) => ipcRenderer.invoke('calendar:mentioning', input)
   },
 
   shell: {

@@ -8,6 +8,10 @@ Mounted at ``/api/calendar``.
   deadline in it.
 * ``POST /events``, ``PATCH /events/{id}``, ``DELETE /events/{id}`` — events. A body with
   ``project_id`` is a project event; without it, a personal one.
+* ``GET /projects/{id}/mention-targets?q=`` — documents, folders and tickets an event's notes may
+  mention after an `@`.
+* ``GET /projects/{id}/mentioning/{kind}/{target_id}`` — the events whose notes mention one of
+  those (what a ticket's panel shows).
 
 Deadlines are read live from the tickets section, so nothing here is stale and no model is called.
 """
@@ -19,10 +23,17 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Response, status
 
-from app.calendar.adapters import TicketDeadlineSource
+from app.calendar.adapters import MentionCatalogueAdapter, TicketDeadlineSource
 from app.calendar.repository import SupabaseCalendarRepository
-from app.calendar.schemas import CalendarOut, EventIn, EventOut, EventPatch
-from app.calendar.service import CalendarService
+from app.calendar.schemas import (
+    CalendarItemOut,
+    CalendarOut,
+    EventIn,
+    EventOut,
+    EventPatch,
+    MentionTargetOut,
+)
+from app.calendar.service import MAX_TARGETS, CalendarService
 from app.core.access import SupabaseProjectAccess
 from app.core.auth import CurrentUser, get_current_user
 
@@ -30,11 +41,12 @@ router = APIRouter(tags=["Calendar"])
 
 
 def get_service() -> CalendarService:
-    """Wire the service (Supabase events, membership, the tickets deadline source)."""
+    """Wire the service (Supabase events, membership, deadlines and mention targets)."""
     return CalendarService(
         repository=SupabaseCalendarRepository(),
         access=SupabaseProjectAccess(),
         deadlines=TicketDeadlineSource(),
+        catalogue=MentionCatalogueAdapter(),
     )
 
 
@@ -100,3 +112,35 @@ async def update_event(
 async def delete_event(event_id: str, user: UserDep, service: ServiceDep) -> Response:
     await service.delete_event(member_id=user.id, event_id=event_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/projects/{project_id}/mention-targets",
+    response_model=list[MentionTargetOut],
+    summary="Documents, folders and tickets an event's notes may offer after an @",
+)
+async def mention_targets(
+    project_id: str,
+    user: UserDep,
+    service: ServiceDep,
+    q: Annotated[str, Query(max_length=120, description="What was typed after the @")] = "",
+    limit: Annotated[int, Query(ge=1, le=MAX_TARGETS)] = MAX_TARGETS,
+) -> list[MentionTargetOut]:
+    rows = await service.mention_targets(
+        member_id=user.id, project_id=project_id, query=q, limit=limit
+    )
+    return [MentionTargetOut(**row) for row in rows]
+
+
+@router.get(
+    "/projects/{project_id}/mentioning/{kind}/{target_id}",
+    response_model=list[CalendarItemOut],
+    summary="Events whose notes mention one document, folder or ticket",
+)
+async def events_mentioning(
+    project_id: str, kind: str, target_id: str, user: UserDep, service: ServiceDep
+) -> list[CalendarItemOut]:
+    rows = await service.events_mentioning(
+        member_id=user.id, project_id=project_id, kind=kind, target_id=target_id
+    )
+    return [CalendarItemOut(**row) for row in rows]

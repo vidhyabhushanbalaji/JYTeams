@@ -19,9 +19,11 @@ import {
   STATUS_LABEL,
   ticketKey
 } from '../lib/tickets'
+import { mentionDraft } from '../lib/chat'
 import type { GraphFocus } from '../lib/graphFocus'
 import { useActivity } from '../state/useActivity'
 import { useProjects } from '../state/useProjects'
+import { useTicketCalendar } from '../state/useTicketCalendar'
 import { useTicketDetail } from '../state/useTicketDetail'
 import { useTickets } from '../state/useTickets'
 import { AddDocumentFlow } from './AddDocumentFlow'
@@ -39,6 +41,8 @@ export function TicketsScreen({
   initialTicketId,
   initialProjectId,
   onOpenProject,
+  onOpenChat,
+  onOpenCalendar,
   onSwitchUser,
   notify
 }: {
@@ -50,6 +54,10 @@ export function TicketsScreen({
   /** The project that ticket belongs to, so the list is filtered to it first. */
   initialProjectId?: string | null
   onOpenProject: (projectId: string, focus: GraphFocus) => void
+  /** Start the project chat with a ticket mentioned. */
+  onOpenChat: (projectId: string, draft: string) => void
+  /** Open the calendar on the day an event mentioning this ticket sits on. */
+  onOpenCalendar: (projectId: string, day: string) => void
   onSwitchUser: () => void
   notify: (message: string, tone?: 'info' | 'error') => void
 }) {
@@ -79,6 +87,7 @@ export function TicketsScreen({
   )
   const { detail, loading: detailLoading, error: detailError, reload: reloadDetail } =
     useTicketDetail(selectedId)
+  const calendar = useTicketCalendar(detail?.project_id ?? null, selectedId)
   const { events, loading: feedLoading, error: feedError } = useActivity(
     { projectId: projectId || undefined },
     true,
@@ -125,6 +134,7 @@ export function TicketsScreen({
     setRevision((value) => value + 1)
     await reloadTickets()
     await reloadDetail()
+    await calendar.reload()
     return result.data
   }
 
@@ -153,7 +163,9 @@ export function TicketsScreen({
             <h1 className="screen__title">Tickets</h1>
             <p className="screen__lede">
               Your tasks across every project you can see, {member.display_name}. Opening a ticket
-              finds the documents it is about — no model is called.
+              finds the documents it is about — no model is called — and shows the calendar events
+              whose notes mention it. <strong>Discuss in chat</strong> starts a message about the
+              ticket in its project’s chat.
             </p>
           </div>
           <div className="screen__actions">
@@ -167,6 +179,7 @@ export function TicketsScreen({
                 setRevision((value) => value + 1)
                 void reloadTickets()
                 void reloadDetail()
+                void calendar.reload()
               }}
             >
               Refresh
@@ -385,6 +398,24 @@ export function TicketsScreen({
                   )
                 }}
                 onShareProject={() => setShareOpen(true)}
+                onDiscuss={() => {
+                  if (!selected) return
+                  onOpenChat(
+                    selected.project_id,
+                    mentionDraft({
+                      kind: 'ticket',
+                      id: selected.id,
+                      label: selected.title,
+                      ticket_number: selected.number
+                    })
+                  )
+                }}
+                calendarEvents={calendar.events}
+                calendarLoading={calendar.loading}
+                calendarError={calendar.error}
+                onOpenCalendar={(day) => {
+                  if (selected) onOpenCalendar(selected.project_id, day)
+                }}
               />
             ) : (
               <div className="feed">

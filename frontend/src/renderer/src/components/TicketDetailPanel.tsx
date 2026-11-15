@@ -8,8 +8,15 @@
 
 import { useEffect, useState } from 'react'
 
-import type { ApiError, TicketDetail, TicketPriority, TicketStatus } from '@shared/types'
+import type {
+  ApiError,
+  CalendarItem,
+  TicketDetail,
+  TicketPriority,
+  TicketStatus
+} from '@shared/types'
 
+import { dayMonthLabel } from '../lib/calendar'
 import { describeError } from '../lib/errors'
 import { humanBytes, scoreText, shortDate } from '../lib/format'
 import { dueLabel, matchTargets, STATUS_LABEL, ticketKey } from '../lib/tickets'
@@ -45,6 +52,14 @@ export interface TicketPanelProps {
   onAttachExisting: () => void
   onDetach: (fileId: string) => Promise<void>
   onShareProject: () => void
+  /** Start the project chat with this ticket mentioned. */
+  onDiscuss: () => void
+  /** Events whose notes mention this ticket. */
+  calendarEvents: CalendarItem[]
+  calendarLoading: boolean
+  calendarError: ApiError | null
+  /** Open the calendar on the day an event sits on. */
+  onOpenCalendar: (day: string) => void
 }
 
 export function TicketDetailPanel(props: TicketPanelProps) {
@@ -129,6 +144,14 @@ export function TicketDetailPanel(props: TicketPanelProps) {
             onClick={() => setEditing((value) => !value)}
           >
             {editing ? 'Cancel' : 'Edit'}
+          </button>
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            onClick={props.onDiscuss}
+            title="Open the project chat with this ticket mentioned"
+          >
+            Discuss in chat
           </button>
           <button type="button" className="btn btn--ghost btn--sm" onClick={props.onShareProject}>
             Share project
@@ -366,6 +389,51 @@ export function TicketDetailPanel(props: TicketPanelProps) {
         <p className="ticket-files__foot">
           Press a file to open the project graph at it; every other match stays highlighted.
         </p>
+      </section>
+
+      <section className="ticket-calendar">
+        <div className="ticket-files__head">
+          <div>
+            <span className="side__label">On the calendar</span>
+            <p className="ticket-files__hint">Events whose notes mention this ticket.</p>
+          </div>
+        </div>
+
+        {props.calendarLoading ? (
+          <p className="side__empty">
+            <Spinner label="Loading events" /> Reading the calendar.
+          </p>
+        ) : null}
+        {props.calendarError ? (
+          <div className="notice notice--error">{describeError(props.calendarError)}</div>
+        ) : null}
+        {!props.calendarLoading &&
+        !props.calendarError &&
+        props.calendarEvents.length === 0 ? (
+          <p className="side__empty">
+            No calendar events mention this ticket yet. Type @ in an event’s notes to add one.
+          </p>
+        ) : null}
+        {props.calendarEvents.length > 0 ? (
+          <ul className="ticket-file-list">
+            {props.calendarEvents.map((event) => (
+              <li key={event.id} className="ticket-file">
+                <button
+                  type="button"
+                  className="ticket-file__open"
+                  onClick={() => props.onOpenCalendar(event.day)}
+                  title="Open the calendar on this day"
+                >
+                  <span className="ticket-file__name">{event.title}</span>
+                  <span className="ticket-file__path">
+                    {dayMonthLabel(event.day)}
+                    {event.project_name ? ` · ${event.project_name}` : ''}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
       </section>
 
       <section className="ticket-comments">

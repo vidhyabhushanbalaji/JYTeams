@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.calendar.router import get_service
 from app.calendar.service import CalendarService
+from app.core.mentions import marker
 from app.main import create_app
 
 CALENDAR = "/api/calendar"
@@ -103,3 +104,44 @@ def test_a_non_creator_cannot_edit_an_event(api: TestClient, world) -> None:
     )
 
     assert response.status_code == 403
+
+
+def test_mention_targets_answer_for_an_event(api: TestClient, world) -> None:
+    response = api.get(
+        f"{CALENDAR}/projects/{world.pulse['id']}/mention-targets", params={"q": "auth"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert [row["label"] for row in response.json()] == ["auth.md"]
+
+
+def test_a_ticket_lists_the_events_that_mention_it(api: TestClient, world) -> None:
+    notes = f"blocked by {marker('ticket', world.ticket_target['id'], 'Fix the login redirect')}"
+    created = api.post(
+        f"{CALENDAR}/events",
+        json={
+            "project_id": world.pulse["id"],
+            "title": "Triage",
+            "notes": notes,
+            "starts_at": "2026-03-20T09:00:00+00:00",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    response = api.get(
+        f"{CALENDAR}/projects/{world.pulse['id']}/mentioning/ticket/{world.ticket_target['id']}"
+    )
+
+    assert response.status_code == 200, response.text
+    rows = response.json()
+    assert [row["id"] for row in rows] == [created.json()["id"]]
+    assert rows[0]["mentions"][0]["ticket_number"] == 12
+
+
+def test_a_stranger_cannot_read_mention_targets(api: TestClient, world) -> None:
+    private = world.repository.seed_project("Private", world.ada["id"])
+    api.headers["X-Dev-User-Id"] = world.bo["id"]
+
+    response = api.get(f"{CALENDAR}/projects/{private['id']}/mention-targets")
+
+    assert response.status_code == 404

@@ -9,7 +9,9 @@ import type {
   CalendarEvent,
   CalendarEventInput,
   CalendarEventPatch,
-  CalendarRange
+  CalendarItem,
+  CalendarRange,
+  MentionTarget
 } from '../../shared/types'
 import { request, requestVoid } from './client'
 
@@ -62,3 +64,22 @@ export function updateEvent(eventId: string, patch: CalendarEventPatch): Promise
 
 export const deleteEvent = (eventId: string): Promise<null> =>
   requestVoid(`${BASE}/events/${id(eventId)}`, { method: 'DELETE' })
+
+export function listMentionTargets(input: {
+  projectId: string
+  query?: string
+  limit?: number
+}): Promise<MentionTarget[]> {
+  const params = new URLSearchParams({ q: input.query ?? '', limit: String(input.limit ?? 20) })
+  return request(`${BASE}/projects/${id(input.projectId)}/mention-targets?${params.toString()}`)
+}
+
+export function eventsMentioning(input: {
+  projectId: string
+  kind: 'file' | 'directory' | 'ticket'
+  id: string
+}): Promise<CalendarItem[]> {
+  return request(
+    `${BASE}/projects/${id(input.projectId)}/mentioning/${input.kind}/${id(input.id)}`
+  )
+}

@@ -8,6 +8,7 @@ from datetime import UTC, date, datetime, time
 from typing import Any
 
 from app.core.access import ProjectAccess, ProjectRole
+from app.core.mentions import Mention
 
 Row = dict[str, Any]
 
@@ -81,6 +82,7 @@ class InMemoryCalendarRepository:
         ends_at: str | None = None,
         all_day: bool = False,
         notes: str = "",
+        mentions: list[Row] | None = None,
     ) -> Row:
         row = {
             "id": f"event-{next(self._ids)}",
@@ -88,6 +90,7 @@ class InMemoryCalendarRepository:
             "member_id": member_id,
             "title": title,
             "notes": notes,
+            "mentions": list(mentions or []),
             "starts_at": starts_at,
             "ends_at": ends_at,
             "all_day": all_day,
@@ -122,6 +125,27 @@ class InMemoryCalendarRepository:
     async def get_event(self, event_id: str) -> Row | None:
         row = self.events.get(event_id)
         return dict(row) if row else None
+
+    async def list_project_events_all(self, *, project_id: str, limit: int = 500) -> list[Row]:
+        rows = [dict(row) for row in self.events.values() if row["project_id"] == project_id]
+        rows.sort(key=lambda row: str(row["starts_at"]))
+        return rows[:limit]
+
+    async def get_events_by_ids(self, event_ids: list[str]) -> list[Row]:
+        return [dict(self.events[event_id]) for event_id in event_ids if event_id in self.events]
+
+    async def list_events_mentioning(
+        self, *, project_id: str, kind: str, target_id: str
+    ) -> list[Row]:
+        return [
+            dict(row)
+            for row in self.events.values()
+            if row["project_id"] == project_id
+            and any(
+                str(item.get("kind")) == kind and str(item.get("id")) == target_id
+                for item in row.get("mentions") or []
+            )
+        ]
 
     async def insert_event(self, payload: Row) -> Row:
         row = {
@@ -214,6 +238,62 @@ class FakeDeadlines:
             if not start <= due <= end:
                 continue
             found.append(dict(row))
+        return found
+
+
+class FakeMentionCatalogue:
+    """Documents, folders and tickets that belong to one project each."""
+
+    def __init__(self) -> None:
+        self.targets: dict[tuple[str, str], dict[str, Any]] = {}
+        self.searches: list[tuple[str, str]] = []
+
+    def seed_target(
+        self,
+        project_id: str,
+        *,
+        kind: str,
+        target_id: str | None = None,
+        label: str,
+        path: str = "",
+        directory_path: str = "",
+        ticket_number: int | None = None,
+    ) -> dict[str, Any]:
+        target = {
+            "kind": kind,
+            "id": target_id or f"{kind}-{len(self.targets) + 1}",
+            "label": label,
+            "path": path,
+            "directory_path": directory_path,
+            "ticket_number": ticket_number,
+            "detail": kind,
+            "project_id": project_id,
+        }
+        self.targets[(kind, target["id"])] = target
+        return target
+
+    async def search(self, *, project_id: str, query: str, limit: int) -> list[dict[str, Any]]:
+        self.searches.append((project_id, query))
+        needle = (query or "").casefold()
+        rows = [
+            {key: value for key, value in target.items() if key != "project_id"}
+            for target in self.targets.values()
+            if target["project_id"] == project_id
+            and (not needle or needle in str(target["label"]).casefold())
+        ]
+        return rows[:limit]
+
+    async def describe(
+        self, *, project_id: str, mentions: Sequence[Mention]
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        found: dict[tuple[str, str], dict[str, Any]] = {}
+        for mention in mentions:
+            target = self.targets.get(mention.key)
+            if target is None or target["project_id"] != project_id:
+                continue
+            found[mention.key] = {
+                key: value for key, value in target.items() if key != "project_id"
+            }
         return found
 
 

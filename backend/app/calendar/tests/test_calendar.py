@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from app.calendar.schemas import EventIn, EventPatch
 from app.calendar.service import CalendarService
+from app.core.mentions import marker
 
 MARCH_START = date(2026, 3, 1)
 MARCH_END = date(2026, 3, 31)
@@ -226,6 +227,170 @@ async def test_a_range_longer_than_the_cap_is_refused(service: CalendarService, 
     with pytest.raises(HTTPException) as error:
         await service.personal(
             member_id=world.ada["id"], start=date(2024, 1, 1), end=date(2026, 1, 1)
+        )
+
+    assert error.value.status_code == 400
+
+
+# ------------------------------------------------------------------------- mentions
+
+
+async def test_event_notes_store_the_mentions_they_carry(service: CalendarService, world) -> None:
+    notes = (
+        f"read {marker('file', world.document['id'], 'auth.md')} before "
+        f"{marker('ticket', world.ticket_target['id'], 'Fix the login redirect')}"
+    )
+
+    created = await service.create_event(
+        member_id=world.ada["id"],
+        payload=EventIn(
+            project_id=world.pulse["id"],
+            title="Design review",
+            notes=notes,
+            starts_at=datetime(2026, 3, 18, 14, 0, tzinfo=UTC),
+        ),
+    )
+
+    assert created["notes"] == notes
+    assert [item["kind"] for item in created["mentions"]] == ["file", "ticket"]
+    assert created["mentions"][0]["path"] == "pulse/guides/auth.md"
+    assert created["mentions"][0]["directory_path"] == "pulse/guides"
+    assert created["mentions"][1]["ticket_number"] == 12
+
+    calendar = await service.project(
+        member_id=world.ada["id"],
+        project_id=world.pulse["id"],
+        start=MARCH_START,
+        end=MARCH_END,
+    )
+    item = next(row for row in calendar["items"] if row["title"] == "Design review")
+    assert [entry["label"] for entry in item["mentions"]] == [
+        "auth.md",
+        "Fix the login redirect",
+    ]
+
+
+async def test_a_mention_from_another_project_is_refused(service: CalendarService, world) -> None:
+    other = world.repository.seed_project("Other", world.ada["id"])
+    foreign = world.catalogue.seed_target(other["id"], kind="file", label="secret.md")
+
+    with pytest.raises(HTTPException) as error:
+        await service.create_event(
+            member_id=world.ada["id"],
+            payload=EventIn(
+                project_id=world.pulse["id"],
+                title="Sneaky",
+                notes=f"see {marker('file', foreign['id'], 'secret.md')}",
+                starts_at=datetime(2026, 3, 18, 14, 0, tzinfo=UTC),
+            ),
+        )
+
+    assert error.value.status_code == 400
+    assert f"file:{foreign['id']}" in str(error.value.detail)
+
+
+async def test_a_personal_event_keeps_markers_as_plain_notes(
+    service: CalendarService, world
+) -> None:
+    notes = f"my own {marker('file', world.document['id'], 'auth.md')}"
+
+    created = await service.create_event(
+        member_id=world.ada["id"],
+        payload=EventIn(
+            title="Dentist",
+            notes=notes,
+            starts_at=datetime(2026, 3, 18, 14, 0, tzinfo=UTC),
+        ),
+    )
+
+    assert created["project_id"] is None
+    assert created["notes"] == notes
+    assert created["mentions"] == []
+
+
+async def test_editing_notes_rebuilds_the_resolved_mentions(
+    service: CalendarService, world
+) -> None:
+    first = await service.create_event(
+        member_id=world.ada["id"],
+        payload=EventIn(
+            project_id=world.pulse["id"],
+            title="Review",
+            notes=f"read {marker('file', world.document['id'], 'auth.md')}",
+            starts_at=datetime(2026, 3, 18, 14, 0, tzinfo=UTC),
+        ),
+    )
+    assert len(first["mentions"]) == 1
+
+    cleared = await service.update_event(
+        member_id=world.ada["id"], event_id=first["id"], payload=EventPatch(notes="no links now")
+    )
+    assert cleared["mentions"] == []
+
+    refreshed = await service.update_event(
+        member_id=world.ada["id"],
+        event_id=first["id"],
+        payload=EventPatch(
+            notes=f"now the {marker('ticket', world.ticket_target['id'], 'Fix the login redirect')}"
+        ),
+    )
+    assert [item["kind"] for item in refreshed["mentions"]] == ["ticket"]
+
+
+async def test_mention_targets_are_scoped_to_the_project(service: CalendarService, world) -> None:
+    other = world.repository.seed_project("Other", world.ada["id"])
+    world.catalogue.seed_target(other["id"], kind="file", label="elsewhere.md")
+
+    rows = await service.mention_targets(
+        member_id=world.ada["id"], project_id=world.pulse["id"], query=""
+    )
+
+    assert {row["label"] for row in rows} == {"auth.md", "Fix the login redirect"}
+    assert world.catalogue.searches == [(world.pulse["id"], "")]
+
+
+async def test_mention_targets_need_membership(service: CalendarService, world) -> None:
+    private = world.repository.seed_project("Private", world.ada["id"])
+
+    with pytest.raises(HTTPException) as error:
+        await service.mention_targets(
+            member_id=world.bo["id"], project_id=private["id"], query="auth"
+        )
+
+    assert error.value.status_code == 404
+
+
+async def test_events_mentioning_a_ticket_are_returned(service: CalendarService, world) -> None:
+    ticket = marker("ticket", world.ticket_target["id"], "Fix the login redirect")
+    created = await service.create_event(
+        member_id=world.ada["id"],
+        payload=EventIn(
+            project_id=world.pulse["id"],
+            title="Triage",
+            notes=f"blocked by {ticket}",
+            starts_at=datetime(2026, 3, 20, 9, 0, tzinfo=UTC),
+        ),
+    )
+
+    rows = await service.events_mentioning(
+        member_id=world.ada["id"],
+        project_id=world.pulse["id"],
+        kind="ticket",
+        target_id=world.ticket_target["id"],
+    )
+
+    assert [row["id"] for row in rows] == [created["id"]]
+    assert rows[0]["day"] == date(2026, 3, 20)
+    assert rows[0]["project_name"] == "Pulse workspace"
+
+
+async def test_events_mentioning_refuses_an_unknown_kind(service: CalendarService, world) -> None:
+    with pytest.raises(HTTPException) as error:
+        await service.events_mentioning(
+            member_id=world.ada["id"],
+            project_id=world.pulse["id"],
+            kind="event",
+            target_id=world.kickoff["id"],
         )
 
     assert error.value.status_code == 400

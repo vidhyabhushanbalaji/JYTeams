@@ -104,6 +104,21 @@ export function isOverdue(item: CalendarItem, today: string = isoDay(new Date())
   return item.kind === 'deadline' && item.day < today && item.status !== 'done'
 }
 
+/**
+ * `20 Mar` for a calendar day.
+ *
+ * The day is built from its parts rather than `new Date('2026-03-20')`, which JavaScript reads as
+ * UTC midnight and would show as the previous day west of Greenwich.
+ */
+export function dayMonthLabel(iso: string): string {
+  const [year, month, day] = iso.slice(0, 10).split('-').map(Number)
+  if (!year || !month || !day) return iso
+  return new Date(year, month - 1, day).toLocaleDateString(undefined, {
+    day: 'numeric',
+    month: 'short'
+  })
+}
+
 /** How a chip reads: a deadline keeps its ticket number. */
 export function itemLabel(item: CalendarItem): string {
   if (item.kind === 'deadline' && item.ticket_number !== null) {

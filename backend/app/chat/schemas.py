@@ -7,7 +7,7 @@ interface.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, Field
 
@@ -25,12 +25,14 @@ class MentionOut(BaseModel):
     kind: str
     id: str
     label: str
-    #: The document's or folder's path; empty for a ticket.
+    #: The document's or folder's path; empty for a ticket or an event.
     path: str = ""
     #: The folder a document lives in, so the graph can reveal it directly.
     directory_path: str = ""
     #: The ticket's number, when the mention is a ticket.
     ticket_number: int | None = None
+    #: The day an event sits on, when the mention is a calendar event.
+    event_day: date | None = None
 
 
 class ChatMessageOut(BaseModel):
@@ -65,7 +67,9 @@ class MentionTargetOut(BaseModel):
     path: str = ""
     directory_path: str = ""
     ticket_number: int | None = None
-    #: A short hint (`guide`, `#12 · To do`), shown beside the label.
+    #: The day an event sits on, when the target is a calendar event.
+    event_day: date | None = None
+    #: A short hint (`guide`, `#12 · To do`, `Tue 3 Mar · project event`), shown beside the label.
     detail: str = ""
 
 

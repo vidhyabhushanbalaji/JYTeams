@@ -21,8 +21,9 @@ Then prepare Supabase:
    [`../supabase/migrations/0002_graph_add.sql`](../supabase/migrations/0002_graph_add.sql),
    [`../supabase/migrations/0003_tickets.sql`](../supabase/migrations/0003_tickets.sql),
    [`../supabase/migrations/0004_ticket_search_terms.sql`](../supabase/migrations/0004_ticket_search_terms.sql),
-   [`../supabase/migrations/0005_chat.sql`](../supabase/migrations/0005_chat.sql)
-   and [`../supabase/migrations/0006_calendar.sql`](../supabase/migrations/0006_calendar.sql)
+   [`../supabase/migrations/0005_chat.sql`](../supabase/migrations/0005_chat.sql),
+   [`../supabase/migrations/0006_calendar.sql`](../supabase/migrations/0006_calendar.sql)
+   and [`../supabase/migrations/0007_calendar_mentions.sql`](../supabase/migrations/0007_calendar_mentions.sql)
    either by pasting them into the dashboard SQL editor, or with the CLI:
    `npx supabase link --project-ref <ref>` then `npx supabase db push`.
    The first creates `projects`, `directories`, `files`, `creation_jobs` and enables `ltree`;
@@ -32,7 +33,9 @@ Then prepare Supabase:
    to this API, never to Supabase directly). Every existing owner is seeded as a member with the
    same uuid, so no row is rewritten; the file ends with a rollback block. The fourth adds
    `tickets.search_terms_fingerprint`; the fifth adds `chat_messages`; the sixth adds
-   `calendar_events`. The last three are additive, with a rollback block each.
+   `calendar_events`; the seventh adds `calendar_events.mentions` (the resolved document, folder
+   and ticket references an event's notes carry). The last four are additive, with a rollback
+   block each.
 2. **Storage** — create a **private** bucket named `project-files` (Storage → New bucket),
    or point `STORAGE_BUCKET` at whatever you call it.
 3. **Auth** — for real tokens set `AUTH_MODE=supabase`. `AUTH_MODE=dev` (the default)
@@ -479,6 +482,13 @@ cached, model-free Graph AI Search result; see *The file cache* below.
 | `POST` | `/tickets/{id}/comments` | `{body}` |
 | `GET` | `/activity?project_id=&ticket_id=&limit=` | Changes and updates; omit `project_id` for every project you can see |
 
+**A ticket's calendar events.** The ticket detail does not embed calendar events, and the tickets
+section does not import the calendar: the desktop app asks
+`GET /api/calendar/projects/{id}/mentioning/ticket/{ticket_id}` for the events whose notes mention
+the ticket and shows them under **On the calendar**. The reverse press — **Discuss in chat** —
+just pre-fills the project chat's composer with `@[#12 …](ticket:<uuid>)`, which the chat route
+validates like any other mention.
+
 ### Why a ticket is distilled first
 
 A ticket is written for people. Graph AI Search scores a query by **term coverage** — the share of
@@ -595,22 +605,26 @@ takes its messages with it. Access is `ProjectAccess.require`, so a stranger get
 | `GET` | `/projects/{id}/messages?after_seq=&limit=` | the newest page (`seq` ascending), or everything after a cursor |
 | `POST` | `/projects/{id}/messages` | `{ "body": "…" }` → the stored message, mentions resolved |
 | `DELETE` | `/messages/{id}` | soft delete (body becomes `[deleted]`); the author, or the project owner |
-| `GET` | `/projects/{id}/mention-targets?q=` | documents, folders and tickets the composer may offer |
+| `GET` | `/projects/{id}/mention-targets?q=` | documents, folders, tickets and calendar events the composer may offer |
 
 **Mentions.** The composer writes a marker into the text — `@[auth.md](file:<uuid>)`,
-`@[guides](directory:<uuid>)`, `@[Fix the redirect](ticket:<uuid>)` — and the backend parses it,
-checks every id belongs to *that* project, and stores the resolved set on the row
-(`mentions jsonb`: kind, id, label, path, directory path, ticket number). One source of truth
-means what a reader sees is what was validated; an unknown or foreign id is a `400`. A deleted
-message keeps its row (and `seq`) so pollers never gap.
+`@[guides](directory:<uuid>)`, `@[Fix the redirect](ticket:<uuid>)`,
+`@[Kickoff](event:<uuid>)` — and the backend parses it, checks every id belongs to *that* project,
+and stores the resolved set on the row (`mentions jsonb`: kind, id, label, path, directory path,
+ticket number, event day). One source of truth means what a reader sees is what was validated; an
+unknown or foreign id is a `400`. The marker grammar itself lives in
+[`app/core/mentions.py`](app/core/mentions.py), because an event's notes write the same syntax.
+A deleted message keeps its row (and `seq`) so pollers never gap.
 
 **Polling, not sockets.** The desktop renderer has no network access, so it asks
 `GET …/messages?after_seq=<last seq>` every ~3 s while the chat is visible (`useChat` pauses while
 the window is hidden). Nothing here calls a model, and nothing writes to a project tree.
 
 Pressing a chip is what ties chat to the rest of the app: a document opens the project graph
-focused on that file, a folder opens it at that folder, and a ticket opens the tickets screen on
-that ticket.
+focused on that file, a folder opens it at that folder, a ticket opens the tickets screen on that
+ticket, and an event opens the calendar on the event's day. The reverse direction is a button on
+the other screens: a calendar event's **Message in chat** and a ticket's **Discuss in chat** open
+the composer with the matching marker already written.
 
 ## Calendar endpoints
 
@@ -622,10 +636,21 @@ Mounted at `/api/calendar`. Two calendars share one shape:
 * **`GET /projects/{id}?from=&to=`** — a project calendar: its events and **every** ticket
   deadline in it.
 * **`POST /events`**, **`PATCH /events/{id}`**, **`DELETE /events/{id}`** — events.
+* **`GET /projects/{id}/mention-targets?q=`** — documents, folders and tickets an event's notes
+  may mention after an `@`.
+* **`GET /projects/{id}/mentioning/{kind}/{target_id}`** — the events whose notes mention one of
+  those. This is what a ticket panel reads to show the events a ticket is discussed in.
 
 An event with `project_id` is a **project event** (every project member sees it); without it, a
 **personal event** (only its creator sees it). Only the creator may edit or delete an event. A
 range is at most 400 days and `ends_at` may not precede `starts_at`.
+
+**Event mentions.** An event's `notes` use the same `@[label](kind:id)` markers as chat. They are
+parsed and validated against the event's project when it is written (`_resolve_notes`), and stored
+resolved in `calendar_events.mentions` ([migration 0007](../supabase/migrations/0007_calendar_mentions.sql)),
+so the calendar can draw chips, chat can resolve an event mention, and a ticket's panel can ask
+which events mention it without re-reading every event. A personal event has no project to check a
+mention against, so markers there stay plain text. No model is called.
 
 **Deadlines are not copied.** They are read from `tickets.due_date` through
 [`app/tickets/public.py`](app/tickets/public.py) on every request, so editing a ticket moves its
@@ -654,6 +679,7 @@ app/
 ├─ core/auth.py       # get_current_user (dev header or Supabase bearer token)
 ├─ core/access.py     # project membership, shared by every section
 ├─ core/activity.py   # the write side of the changes-and-updates feed (no-op default)
+├─ core/mentions.py   # the `@[label](kind:id)` marker: parse, clean, dedupe (pure; chat + calendar)
 ├─ db/supabase.py     # admin_client() / anon_client(), reachability ping
 ├─ health/router.py
 ├─ core/text.py       # shared vocabulary work: tokens, stems, scoring, excerpts
@@ -699,15 +725,16 @@ app/
 ├─ chat/              # SECTION — implemented (one group chat per project, with mentions)
 │  ├─ router.py       # HTTP surface
 │  ├─ service.py      # membership, message resolution, channels
-│  ├─ mentions.py     # the `@[label](kind:id)` marker: parse, clean, dedupe (pure)
-│  ├─ adapters.py     # mention targets through the graph + tickets public modules
+│  ├─ mentions.py     # the chat's import site for app.core.mentions (the marker grammar)
+│  ├─ adapters.py     # mention targets through the graph + tickets + calendar public modules
 │  ├─ repository.py   # PostgREST access (chat_messages, names)
 │  ├─ schemas.py
 │  └─ tests/
 └─ calendar/          # SECTION — implemented (project calendars + the merged individual one)
    ├─ router.py       # HTTP surface
-   ├─ service.py      # scope rules, event ownership, deadline merge
-   ├─ adapters.py     # ticket deadlines through app.tickets.public
+   ├─ service.py      # scope rules, event ownership, event mentions, deadline merge
+   ├─ adapters.py     # deadlines + mention targets through the other sections' public modules
+   ├─ public.py       # the only module another section may import (events as mention targets)
    ├─ repository.py   # PostgREST access (calendar_events, names)
    ├─ schemas.py
    └─ tests/

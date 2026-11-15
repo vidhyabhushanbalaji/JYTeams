@@ -21,6 +21,8 @@ import { run } from './api/client'
 import {
   createEvent,
   deleteEvent,
+  eventsMentioning,
+  listMentionTargets as listCalendarMentionTargets,
   personalCalendar,
   projectCalendar,
   updateEvent
@@ -211,6 +213,16 @@ export function registerIpc(): void {
     run(() => updateEvent(eventId, patch))
   )
   ipcMain.handle('calendar:delete', (_event, eventId: string) => run(() => deleteEvent(eventId)))
+  ipcMain.handle(
+    'calendar:mention-targets',
+    (_event, input: { projectId: string; query?: string; limit?: number }) =>
+      run(() => listCalendarMentionTargets(input))
+  )
+  ipcMain.handle(
+    'calendar:mentioning',
+    (_event, input: { projectId: string; kind: 'file' | 'directory' | 'ticket'; id: string }) =>
+      run(() => eventsMentioning(input))
+  )
 
 
 }

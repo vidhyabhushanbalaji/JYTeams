@@ -5,6 +5,7 @@ import type { CalendarItem } from '@shared/types'
 import {
   addMonths,
   compareItems,
+  dayMonthLabel,
   durationLabel,
   isOverdue,
   itemLabel,
@@ -32,6 +33,7 @@ function item(overrides: Partial<CalendarItem>): CalendarItem {
     status: null,
     priority: null,
     assignee: null,
+    mentions: [],
     ...overrides
   }
 }
@@ -100,5 +102,10 @@ describe('day buckets and labels', () => {
       )
     ).toBe('1h 30m')
     expect(durationLabel(item({ starts_at: '2026-03-03T10:00:00+00:00' }))).toBe('')
+  })
+
+  it('labels a calendar day without shifting it across timezones', () => {
+    expect(dayMonthLabel('2026-03-20')).toMatch(/20/)
+    expect(dayMonthLabel('not-a-day')).toBe('not-a-day')
   })
 })

@@ -19,8 +19,8 @@ type View =
   | { kind: 'home' }
   | { kind: 'project'; projectId: string; focus: GraphFocus | null }
   | { kind: 'tickets'; ticketId?: string | null; projectId?: string | null }
-  | { kind: 'chat'; projectId?: string | null }
-  | { kind: 'calendar' }
+  | { kind: 'chat'; projectId?: string | null; draft?: string | null }
+  | { kind: 'calendar'; projectId?: string | null; day?: string | null }
 
 export default function App() {
   const [view, setView] = useState<View>({ kind: 'home' })
@@ -109,6 +109,8 @@ export default function App() {
             initialTicketId={view.ticketId ?? null}
             initialProjectId={view.projectId ?? null}
             onOpenProject={(projectId, focus) => setView({ kind: 'project', projectId, focus })}
+            onOpenChat={(projectId, draft) => setView({ kind: 'chat', projectId, draft })}
+            onOpenCalendar={(projectId, day) => setView({ kind: 'calendar', projectId, day })}
             onSwitchUser={switchUser}
             notify={notify}
           />
@@ -116,14 +118,22 @@ export default function App() {
           <ChatScreen
             member={member}
             initialProjectId={view.projectId ?? null}
+            initialDraft={view.draft ?? null}
             onOpenProject={(projectId, focus) => setView({ kind: 'project', projectId, focus })}
             onOpenTicket={(projectId, ticketId) => setView({ kind: 'tickets', projectId, ticketId })}
+            onOpenCalendar={(projectId, _eventId, day) =>
+              setView({ kind: 'calendar', projectId, day })
+            }
             notify={notify}
           />
         ) : view.kind === 'calendar' ? (
           <CalendarScreen
             member={member}
+            initialProjectId={view.projectId ?? null}
+            initialDay={view.day ?? null}
             onOpenTicket={(projectId, ticketId) => setView({ kind: 'tickets', projectId, ticketId })}
+            onOpenProject={(projectId, focus) => setView({ kind: 'project', projectId, focus })}
+            onOpenChat={(projectId, draft) => setView({ kind: 'chat', projectId, draft })}
             notify={notify}
           />
         ) : (

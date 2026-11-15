@@ -21,6 +21,20 @@ class PersonOut(BaseModel):
     display_name: str
 
 
+class EventMentionOut(BaseModel):
+    """A reference stored with an event's notes (resolved when the event was written)."""
+
+    kind: str
+    id: str
+    label: str
+    #: The document's or folder's path; empty for a ticket.
+    path: str = ""
+    #: The folder a document lives in, so the graph can reveal it directly.
+    directory_path: str = ""
+    #: The ticket's number, when the mention is a ticket.
+    ticket_number: int | None = None
+
+
 class CalendarItemOut(BaseModel):
     """One thing on a day: an added event, or a ticket's deadline."""
 
@@ -39,13 +53,27 @@ class CalendarItemOut(BaseModel):
     #: True for an event the caller created; the app only offers edit/delete then.
     editable: bool = False
     created_by: PersonOut | None = None
-    #: Set on a deadline (and on an event that was linked to a ticket, which this build does not
-    #: do yet) so the app can open the ticket.
+    #: Set on a deadline so the app can open the ticket.
     ticket_id: str | None = None
     ticket_number: int | None = None
     status: str | None = None
     priority: str | None = None
     assignee: PersonOut | None = None
+    #: Documents, folders and tickets the event's notes mention.
+    mentions: list[EventMentionOut] = Field(default_factory=list)
+
+
+class MentionTargetOut(BaseModel):
+    """One thing an event's notes may offer after an `@`."""
+
+    kind: str
+    id: str
+    label: str
+    path: str = ""
+    directory_path: str = ""
+    ticket_number: int | None = None
+    #: A short hint (`guide`, `#12 · To do`), shown beside the label.
+    detail: str = ""
 
 
 class CalendarOut(BaseModel):
@@ -109,3 +137,5 @@ class EventOut(BaseModel):
     created_by: PersonOut | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    #: The documents, folders and tickets the notes mention (resolved when it was saved).
+    mentions: list[EventMentionOut] = Field(default_factory=list)

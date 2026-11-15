@@ -10,6 +10,7 @@ import pytest
 from app.calendar.service import CalendarService
 from app.calendar.tests.fakes import (
     FakeDeadlines,
+    FakeMentionCatalogue,
     FakeProjectAccess,
     InMemoryCalendarRepository,
     at,
@@ -27,14 +28,30 @@ def deadlines(repository: InMemoryCalendarRepository) -> FakeDeadlines:
 
 
 @pytest.fixture()
-def service(repository: InMemoryCalendarRepository, deadlines: FakeDeadlines) -> CalendarService:
+def catalogue() -> FakeMentionCatalogue:
+    return FakeMentionCatalogue()
+
+
+@pytest.fixture()
+def service(
+    repository: InMemoryCalendarRepository,
+    deadlines: FakeDeadlines,
+    catalogue: FakeMentionCatalogue,
+) -> CalendarService:
     return CalendarService(
-        repository=repository, access=FakeProjectAccess(repository), deadlines=deadlines
+        repository=repository,
+        access=FakeProjectAccess(repository),
+        deadlines=deadlines,
+        catalogue=catalogue,
     )
 
 
 @pytest.fixture()
-def world(repository: InMemoryCalendarRepository, deadlines: FakeDeadlines) -> SimpleNamespace:
+def world(
+    repository: InMemoryCalendarRepository,
+    deadlines: FakeDeadlines,
+    catalogue: FakeMentionCatalogue,
+) -> SimpleNamespace:
     """Ada owns *Pulse* and *Orbit*; Bo is on both. Deadlines fall in March 2026."""
     ada = repository.seed_member("Ada Lovelace")
     bo = repository.seed_member("Bo Chen")
@@ -99,9 +116,26 @@ def world(repository: InMemoryCalendarRepository, deadlines: FakeDeadlines) -> S
         number=4,
     )
 
+    document = catalogue.seed_target(
+        pulse["id"],
+        kind="file",
+        target_id="file-auth",
+        label="auth.md",
+        path="pulse/guides/auth.md",
+        directory_path="pulse/guides",
+    )
+    ticket_target = catalogue.seed_target(
+        pulse["id"],
+        kind="ticket",
+        target_id="ticket-1",
+        label="Fix the login redirect",
+        ticket_number=12,
+    )
+
     return SimpleNamespace(
         repository=repository,
         deadlines=deadlines,
+        catalogue=catalogue,
         ada=ada,
         bo=bo,
         pulse=pulse,
@@ -111,4 +145,6 @@ def world(repository: InMemoryCalendarRepository, deadlines: FakeDeadlines) -> S
         offsite=offsite,
         personal=personal,
         bos_private=bos_private,
+        document=document,
+        ticket_target=ticket_target,
     )

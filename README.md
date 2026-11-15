@@ -20,10 +20,13 @@ read its markdown in the app and save an edit back. **Tickets** sit on top: sign
 (no password — this is a hackathon build), share a project with teammates, keep a personal
 to-do list of tasks, and press a ticket to see the project documents it is about — the search
 runs once and is cached on the ticket. **Chat** gives every project a group chat with `@`
-mentions of documents, folders and tickets, and **calendars** come in two shapes: one per
-project, and one individual calendar that merges every project you are in — with ticket
-deadlines appearing automatically (all of them on a project calendar, only yours on the
-individual one). Details for each: [`backend/README.md`](backend/README.md).
+mentions of documents, folders, tickets and calendar events, and **calendars** come in two shapes:
+one per project, and one individual calendar that merges every project you are in — with ticket
+deadlines appearing automatically (all of them on a project calendar, only yours on the individual
+one). A calendar event's notes mention documents, folders and tickets too, so an event and the work
+it is about point at each other: a ticket lists the events that mention it, an event can start a
+chat message about itself in one press, and a chat message can open the calendar on the event it
+mentions. Details for each: [`backend/README.md`](backend/README.md).
 
 | Section | Directory | HTTP prefix | State |
 | --- | --- | --- | --- |

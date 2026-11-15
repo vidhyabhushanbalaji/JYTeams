@@ -2398,7 +2398,8 @@ select.field__input {
 /* ------------------------------------------------------------- files */
 
 .ticket-files,
-.ticket-comments {
+.ticket-comments,
+.ticket-calendar {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -2865,6 +2866,23 @@ button.ticket-file__open:hover .ticket-file__name {
   border-style: dashed;
 }
 
+.mention-chip--event {
+  border-style: dotted;
+}
+
+.mention-field {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+/* The picker belongs to the field, not to the screen's composer padding. */
+.mention-field > .mention-picker {
+  right: 0;
+  left: 0;
+}
+
 .chat-composer {
   position: relative;
   display: flex;
@@ -3236,6 +3254,13 @@ button.ticket-file__open:hover .ticket-file__name {
   color: var(--ink-soft);
   font-size: var(--text-sm);
   white-space: pre-wrap;
+}
+
+.cal-day-item__mentions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 2px;
 }
 
 .cal-day-item__actions {

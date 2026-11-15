@@ -21,10 +21,16 @@ def test_every_kind_is_recognised() -> None:
             marker("file", "f-1", "auth.md"),
             marker("directory", "d-1", "guides"),
             marker("ticket", "t-1", "Fix the redirect"),
+            marker("event", "e-1", "Kickoff"),
         ]
     )
 
-    assert [mention.kind for mention in extract(body)] == ["file", "directory", "ticket"]
+    assert [mention.kind for mention in extract(body)] == [
+        "file",
+        "directory",
+        "ticket",
+        "event",
+    ]
 
 
 def test_mentions_are_distinct_and_in_the_order_they_appear() -> None:
