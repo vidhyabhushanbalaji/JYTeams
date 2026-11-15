@@ -17,20 +17,27 @@ Copy-Item .env.example .env    # then fill in the Supabase / Gemini values
 Then prepare Supabase:
 
 1. **Schema** — apply
-   [`../supabase/migrations/0001_graph_creation.sql`](../supabase/migrations/0001_graph_creation.sql)
-   and [`../supabase/migrations/0002_graph_add.sql`](../supabase/migrations/0002_graph_add.sql)
+   [`../supabase/migrations/0001_graph_creation.sql`](../supabase/migrations/0001_graph_creation.sql),
+   [`../supabase/migrations/0002_graph_add.sql`](../supabase/migrations/0002_graph_add.sql)
+   and [`../supabase/migrations/0003_tickets.sql`](../supabase/migrations/0003_tickets.sql)
    either by pasting them into the dashboard SQL editor, or with the CLI:
    `npx supabase link --project-ref <ref>` then `npx supabase db push`.
-   The first creates `projects`, `directories`, `files`, `creation_jobs`, enables `ltree`
-   and adds row level security policies; the second adds `add_requests` for Graph Add.
+   The first creates `projects`, `directories`, `files`, `creation_jobs` and enables `ltree`;
+   the second adds `add_requests` for Graph Add; the third **repoints ownership at `members`**
+   (a name-only identity), adds `project_members`, `tickets`, `ticket_files`, `ticket_comments`,
+   `ticket_events` and `files.updated_at`, and drops the old `auth.uid()` policies (the app talks
+   to this API, never to Supabase directly). Every existing owner is seeded as a member with the
+   same uuid, so no row is rewritten; the file ends with a rollback block.
 2. **Storage** — create a **private** bucket named `project-files` (Storage → New bucket),
    or point `STORAGE_BUCKET` at whatever you call it.
 3. **Auth** — for real tokens set `AUTH_MODE=supabase`. `AUTH_MODE=dev` (the default)
    trusts the `X-Dev-User-Id` header, which is what you want while Supabase Auth is not
    wired into the frontend yet.
-   In dev mode that id must be a **real** Supabase user (Authentication -> Users -> Add user,
-   copy the UUID into `DEV_USER_ID`): `projects.owner_id` references `auth.users`, so a
-   made-up id fails with a foreign-key error (`23503`).
+   **Identity is a name, not an auth user.** After migration 0003 the header carries a
+   `members.id`: `POST /api/tickets/members {"display_name": "Ada"}` signs in (find-or-create)
+   and the desktop app stores that id in its config. The startup screen lists the names that
+   already exist. No password and no token is involved — this is a hackathon build, and
+   `AUTH_MODE=supabase` is still there if real accounts are wanted later.
 
 With an empty `.env` the API still starts: `/health` works, `/health/supabase` reports
 `503`, and section endpoints answer `503` instead of crashing.
@@ -194,6 +201,13 @@ exercise.
 Mounted under `/api/graph-ai-search`. One read endpoint: it scores the project tree for a
 query and returns the documents that answer it, ranked, plus the folders worth browsing.
 **No model is called and nothing is written**, so it is cheap to call repeatedly.
+
+Matching is lexical and separator-blind: `-`, `_` and Unicode dashes split a word, camelCase is
+split, and a compound name is also indexed as its glued form — so a query for `rollback plan`
+finds `rollback-plan.md`, `rollback_plan.md`, `rollbackPlan.md` and a body that says
+`rollback-plan`; a query for `rollbackplan` still finds the compound. The exact-phrase bonus is
+normalised the same way. Descriptions are stored as plain prose (see "How the tree is built"), so
+folder text reads the way people type.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -405,14 +419,18 @@ identical to what the API stores.
    `DESCRIPTION_FILE_HEAD_CHARS`, the folder total capped by `DESCRIPTION_MAX_INPUT_CHARS`).
    **Files are not summarised at all** — one model call per directory — and the prompt asks for
    the words a reader would search for, because a local search matches this text to find the
-   folder. Folders on the same level have no dependency on each other and run concurrently up to
-   `SUMMARY_CONCURRENCY`; progress is reported per folder, so the job moves steadily instead of
-   jumping in tens of files. Every description is capped at `DESCRIPTION_MAX_CHARS` (300): the
-   prompt asks for that length and the reply is clipped to it, at a word boundary. Model calls
-   start at least `LLM_MIN_INTERVAL_SECONDS` (2 s) apart, including retries and fallback models.
-   Gemini (`gemini-3.1-flash-lite`) is the only provider; with no `GEMINI_API_KEY` (or
-   `SUMMARIZER=mock`) a deterministic offline mock writes the descriptions, so the pipeline
-   runs (and tests pass) with no key and no network.
+   folder. It also asks for **plain prose**: no hyphenated, underscored or run-together
+   identifiers ("rollback plan", not "rollback-plan"), and every description is naturalised by
+   `clip_description` on the way in, so an existing row can be rewritten with
+   `app.graph_creation.tools.normalise_descriptions` (no model call; text in backticks and URLs
+   is preserved). Folders on the same level have no dependency on each other and run concurrently
+   up to `SUMMARY_CONCURRENCY`; progress is reported per folder, so the job moves steadily
+   instead of jumping in tens of files. Every description is capped at `DESCRIPTION_MAX_CHARS`
+   (300): the prompt asks for that length and the reply is clipped to it, at a word boundary.
+   Model calls start at least `LLM_MIN_INTERVAL_SECONDS` (2 s) apart, including retries and
+   fallback models. Gemini (`gemini-3.1-flash-lite`) is the only provider; with no
+   `GEMINI_API_KEY` (or `SUMMARIZER=mock`) a deterministic offline mock writes the descriptions,
+   so the pipeline runs (and tests pass) with no key and no network.
 4. **Persist** (`repository.py`, `storage.py`) — blobs go to Storage under
    `{project_id}/{sha256}.md` (content-addressed: identical content is stored once, but
    every path still gets its own row), then `directories` are inserted one level at a time
@@ -428,6 +446,137 @@ are attached, then every affected directory and its ancestors (deepest first) is
 from the files' text — read back from Storage for the ones already there — and its child
 counts refreshed. Uploaded paths that already exist are rejected with `409`.
 
+## Tickets endpoints
+
+Mounted under `/api/tickets`. Identity is a **name**: signing in finds or creates a member, and
+`X-Dev-User-Id` carries that member's id afterwards. A project belongs to the members listed in
+`project_members`; `projects.owner_id` is only the creator, and the project list returns the
+caller's `role` (`owner` or `member`). Opening a ticket for the first time makes **one model call**
+(`app/tickets/distill.py`) that reduces the ticket's own wording to a short search query, then a
+cached, model-free Graph AI Search result; see *The file cache* below.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/members` | Sign in (find-or-create) with `{display_name}` |
+| `GET` | `/members` | Every name, for the startup picker / assignee list |
+| `GET` | `/me` | The caller as a member; **404** means "pick a name again" |
+| `GET` | `/projects/{id}/members` | Who can see a project |
+| `POST` | `/projects/{id}/members` | Share with `{member_id}` (owner only) |
+| `DELETE` | `/projects/{id}/members/{member_id}` | Stop sharing (owner only; the owner cannot be removed) |
+| `GET` | `/tickets?scope=mine\|project&project_id=&status=&limit=` | `mine` (default) is the caller's to-do list; `project` needs a `project_id` |
+| `POST` | `/tickets` | Create `{project_id, title, description?, assignee_id?, priority?, due_date?, labels?}` |
+| `GET` | `/tickets/{id}?refresh=` | The ticket, its comments **and** its files (runs the cached search once) |
+| `PATCH` | `/tickets/{id}` | Only the fields you send; `null` assigns nothing / clears the field |
+| `POST` | `/tickets/{id}/status` | `{status: todo\|in_progress\|done}` — completion stamps who and when |
+| `GET` | `/tickets/{id}/files?refresh=` | The cached file set (refresh recomputes it) |
+| `POST` | `/tickets/{id}/files` | Attach an existing project document: `{file_id, source?}` |
+| `DELETE` | `/tickets/{id}/files/{file_id}` | Take a document off the ticket (it stays in the project) |
+| `POST` | `/tickets/{id}/comments` | `{body}` |
+| `GET` | `/activity?project_id=&ticket_id=&limit=` | Changes and updates; omit `project_id` for every project you can see |
+
+### Why a ticket is distilled first
+
+A ticket is written for people. Graph AI Search scores a query by **term coverage** — the share of
+its terms each folder and document contains — so a description full of dates, names, acceptance
+criteria and process verbs ("review", "whether", "still") drags every score down and can leave the
+walk with nothing to open. One model call reduces the ticket to the words a document about it would
+use:
+
+```text
+"Review whether decision rights are still accurate"  ->  query: "decision rights accurate"
+                                                         points: ["decision rights", "approval authority"]
+```
+
+- `app/tickets/distill.py` holds the prompt, the Gemini client and `LocalDistiller` — the offline,
+  deterministic reduction used by tests, keyless runs and `SUMMARIZER=mock`. It drops task words
+  from a fixed list and keeps the ticket's most frequent content words.
+- The call is `temperature: 0`, JSON output (`{"query": …, "terms": […]}`), capped at 200
+  characters of query and five points of 60 characters; the points are joined into the search's
+  `context` (≤ 500 characters) and clipped again after the reply.
+- **A model problem never breaks a ticket.** No key, `SUMMARIZER=mock`, an empty reply, a bad key or
+  a timeout all fall back to `cache.search_query` (the title, or the description when the title is
+  very short), and the failure is not cached, so the next open tries the model again.
+
+### The file cache (and why reopening a ticket is free)
+
+A ticket's files come from `GET /api/graph-ai-search/projects/{id}/search` with `q` = the distilled
+query and `context` = the distilled points, capped at five results. Two caches, with one fingerprint
+each, are stored on the ticket row:
+
+| Cache | Fingerprint covers | Re-made when |
+| --- | --- | --- |
+| the terms (`search_query`, `search_context`) | title · description · `DISTILLER_VERSION` | the ticket's wording changes |
+| the results (`search_results`) | distilled query · context · file count · newest `files.updated_at` · limit · `SCORING_FOLDER_THRESHOLD` · `MATCHING_VERSION` · `DISTILLER_VERSION` | the terms change, a document is added or edited, or `?refresh=true` |
+
+- The first time a ticket is opened both run; the second open is a database read.
+- A project document added or edited re-runs **only the model-free search**: the words did not
+  change, so the model is not asked again. The same is true of `?refresh=true`.
+- Raising `MATCHING_VERSION` in `app/tickets/cache.py` (keep it in step with `ScoreConfig.version`)
+  invalidates every stored result exactly once; raising `DISTILLER_VERSION` (when the prompt or the
+  distiller changes) re-distils every ticket exactly once. That is how an improvement reaches
+  tickets nobody has edited.
+- A cached hit whose document no longer exists is dropped and the response is marked
+  `stale: true`, so the UI can offer Refresh.
+- Attaching a document never changes the ticket's status; a file may be on several tickets.
+- `search_terms_fingerprint` is the column added by `0004_ticket_search_terms.sql`. A ticket written
+  before that migration simply re-distils once.
+
+### Adding a file from a ticket
+
+The desktop app reuses the Graph Add wizard with the ticket as context:
+`POST /api/graph-add/suggestions` now accepts an optional `context` form field (the ticket's title
+and description, ≤ 500 characters). The document is still scored on its own words; the context is
+scored separately on the same folders and can carry a folder the document does not name, at half
+strength — so a confident document match is never overruled. After `POST /placements` succeeds the
+app links the new file with `POST /tickets/{id}/files` (`source: "upload"`), which is what writes
+the ticket-scoped activity event.
+
+### Activity
+
+`ticket_events` is append-only and feeds the "Changes and updates" panel. Ticket kinds:
+`ticket_created`, `ticket_assigned`, `ticket_status_changed`, `ticket_completed`,
+`ticket_reopened`, `ticket_updated`, `ticket_commented`, `file_attached`, `file_detached`.
+Project kinds (no ticket): `project_shared`, `project_member_removed`, `files_uploaded` (Graph
+Creation), `file_added` (Graph Add), `document_saved` (the editor). Sections write through
+`app/core/activity.py`, whose default is a no-op so unit tests stay hermetic — a failed audit row
+never fails an upload, a save or a placement.
+
+### Trying it without the app
+
+```powershell
+# sign in, then use the id it returns as X-Dev-User-Id
+curl.exe -X POST http://localhost:8000/api/tickets/members -H "Content-Type: application/json" -d "{\"display_name\":\"Ada\"}"
+
+# a ticket, then its files (the first open runs the search; the second is cached)
+curl.exe -X POST http://localhost:8000/api/tickets/tickets -H "Content-Type: application/json" -H "X-Dev-User-Id: <member-id>" -d "{\"project_id\":\"<uuid>\",\"title\":\"Fix the login redirect\"}"
+curl.exe "http://localhost:8000/api/tickets/tickets/<ticket-id>" -H "X-Dev-User-Id: <member-id>"
+```
+
+Offline (no Supabase, no model calls):
+
+```powershell
+..\\.venv\\Scripts\\python.exe -m app.tickets.tools.verify_tickets
+..\\.venv\\Scripts\\python.exe -m app.tickets.tools.seed_demo --project-id <uuid>
+```
+
+`verify_tickets` is an in-memory walkthrough (identity → sharing → cached search → attach →
+complete → feed). `seed_demo` writes a demo to the configured Supabase project: three named
+members, a shared project, four tickets, a comment, a completion and two attached documents.
+
+### Rewriting older descriptions as prose
+
+Descriptions written before the plain-prose rule may still contain `rollback-plan` or
+`deploy_run`. This tool rewrites them in place — separators become spaces, every word is kept,
+code spans and URLs are untouched, and **no model is called**:
+
+```powershell
+..\\.venv\\Scripts\\python.exe -m app.graph_creation.tools.normalise_descriptions          # report only
+..\\.venv\\Scripts\\python.exe -m app.graph_creation.tools.normalise_descriptions --apply  # write
+```
+
+Add `--project-id <uuid>` to sweep one project. A folder's description is not re-described;
+only its punctuation changes, so no quota is spent and the tree keeps its shape.
+
 ## Test & lint
 
 ```powershell
@@ -438,7 +587,7 @@ counts refreshed. Uploaded paths that already exist are rejected with `409`.
 
 The suite is hermetic — settings are blanked, auth runs in dev mode, and the section tests
 use an in-memory repository, an in-memory object store and each section's mock describer (or,
-for search, the real local scorer). Nothing
+for search, the real local scorer; for tickets, the offline distiller). Nothing
 touches Supabase, a model provider or the network.
 
 ## Structure
@@ -448,6 +597,8 @@ app/
 ├─ main.py            # app factory, lifespan, CORS, mounts the section routers
 ├─ core/config.py     # Settings (pydantic-settings) — the only place env vars are read
 ├─ core/auth.py       # get_current_user (dev header or Supabase bearer token)
+├─ core/access.py     # project membership, shared by every section
+├─ core/activity.py   # the write side of the changes-and-updates feed (no-op default)
 ├─ db/supabase.py     # admin_client() / anon_client(), reachability ping
 ├─ health/router.py
 ├─ core/text.py       # shared vocabulary work: tokens, stems, scoring, excerpts
@@ -477,7 +628,18 @@ app/
    ├─ search.py       # the walk: score folders, read documents, rank
    ├─ scoring.py      # folder/document scoring (weights shared with Graph Add)
    ├─ storage.py      # reads document bodies, digest-keyed LRU
+   ├─ public.py       # the only module another section may import (build + search)
    ├─ router.py, service.py, schemas.py, repository.py
+   └─ tests/
+└─ tickets/           # SECTION — implemented (names, sharing, tickets, cached files, feed)
+   ├─ router.py       # HTTP surface
+   ├─ service.py      # identity, sharing, tickets, completion, comments, the cache
+   ├─ repository.py   # PostgREST access (members, tickets, files, events)
+   ├─ schemas.py      # request/response models
+   ├─ cache.py        # the two fingerprints (terms + results) and the no-model fallback query
+   ├─ distill.py      # one model call: a ticket's wording → its search terms (or the offline one)
+   ├─ adapters.py     # Graph AI Search through its public module
+   ├─ tools/          # verify_tickets (offline), seed_demo (Supabase)
    └─ tests/
 ```
 
@@ -490,7 +652,7 @@ All settings and defaults live in `app/core/config.py`; env var names are in
 | --- | --- |
 | `APP_ENV`, `LOG_LEVEL`, `API_PREFIX` | Operational defaults |
 | `CORS_ORIGINS` | Comma separated (or JSON list); add the Electron origin later |
-| `AUTH_MODE`, `DEV_USER_ID` | `dev` trusts `X-Dev-User-Id`; `supabase` verifies the bearer token |
+| `AUTH_MODE`, `DEV_USER_ID` | `dev` trusts `X-Dev-User-Id`; `supabase` verifies the bearer token. The id is a `members.id` after migration 0003 — `POST /api/tickets/members` creates one from a name |
 | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` | Service role bypasses RLS — server-side only |
 | `STORAGE_BUCKET` | Bucket for uploaded markdown (default `project-files`) |
 | `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_THINKING_LEVEL`, `GEMINI_FALLBACK_MODELS` | The only describer provider (`google-genai`). Default model `gemini-3.1-flash-lite`; 2.5 models are access-gated and answer `404 model not found` for newer projects. Fallbacks are empty by default, so every description comes from that model. `GEMINI_THINKING_LEVEL` is `minimal` / `low` / `medium` / `high`; blank (the default) sends no thinking config at all, which is cheapest. There is no numeric thinking budget: models from 3.5 onwards reject it |
@@ -503,6 +665,11 @@ All settings and defaults live in `app/core/config.py`; env var names are in
 | `MAX_UPLOAD_FILES`, `MAX_UPLOAD_BYTES`, `MAX_FILE_BYTES`, `MAX_DIRECTORY_DEPTH` | Upload limits |
 
 ## Known limitations
+
+- **Identity is a name, and that is the whole check.** `X-Dev-User-Id` is trusted in
+  `AUTH_MODE=dev`, and a member is created by typing a name on the startup screen. Anyone can be
+  anyone: this is a hackathon build, not a security model. `AUTH_MODE=supabase` still verifies
+  bearer tokens, but members and auth users are no longer the same thing.
 
 - **Background jobs are in-process `asyncio` tasks.** Run a single uvicorn worker; a hard
   crash mid-job leaves that job row unfinished (no partial tree is ever written, because

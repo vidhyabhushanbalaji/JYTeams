@@ -18,6 +18,14 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 _WORD = re.compile(r"[a-z0-9]+")
+#: A maximal run of alphanumerics joined by a hyphen, underscore or dash: ``rollback-plan``,
+#: ``rollback_plan``, ``deploy–rollback``. Those are separators, not letters, so a compound name
+#: answers the same words as the prose spelling.
+_COMPOUND_RUN = re.compile(r"[A-Za-z0-9]+(?:[-_\u2010-\u2015][A-Za-z0-9]+)*")
+#: Just the separators, used to normalise a phrase or rewrite a description as prose.
+_SEPARATORS = re.compile(r"[\-_\u2010-\u2015]+")
+#: ``releaseNotes`` → ``release Notes``. camelCase names are two words to a reader.
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 #: Fences are dropped but the code inside is kept: an error code or a CLI name often appears
 #: nowhere else in the document.
 _FENCE = re.compile(r"```[a-zA-Z0-9_+-]*\s*|~~~[a-zA-Z0-9_+-]*\s*")
@@ -96,20 +104,34 @@ def stem(word: str) -> str:
     return word[:-1] if len(word) > 4 and word.endswith("e") else word
 
 
-def terms(text: str) -> frozenset[str]:
-    """The stemmed vocabulary of a text, stopwords removed."""
-    return frozenset(
-        stem(word) for word in _WORD.findall(strip_markdown(text).lower()) if word not in STOPWORDS
-    )
+def _tokens(text: str, *, compounds: bool = True) -> list[str]:
+    """The words of a text, with compound names split — and, for indexed text, glued back.
+
+    ``rollback-plan``, ``rollback_plan`` and ``rollback plan`` all yield ``rollback`` and
+    ``plan``. Indexed text (a document, a description) also yields ``rollbackplan``, so a query
+    typed without the separator still matches a file that has one. Queries pass
+    ``compounds=False``: their terms are the words a person typed, so a hyphenated query still
+    covers prose that simply says "rollback plan". camelCase is split both ways, because
+    ``releaseNotes`` is two words to a reader. Stopwords are dropped here.
+    """
+    value = _CAMEL_BOUNDARY.sub(" ", strip_markdown(text))
+    tokens: list[str] = []
+    for run in _COMPOUND_RUN.findall(value):
+        words = _WORD.findall(run.lower())
+        tokens.extend(words)
+        if compounds and len(words) > 1:
+            tokens.append("".join(words))
+    return [word for word in tokens if word not in STOPWORDS]
+
+
+def terms(text: str, *, compounds: bool = True) -> frozenset[str]:
+    """The stemmed vocabulary of a text, stopwords removed (separators split compounds)."""
+    return frozenset(stem(word) for word in _tokens(text, compounds=compounds))
 
 
 def term_counts(text: str) -> Counter[str]:
     """Stemmed term frequencies, stopwords removed (feeds the repeat-capped body score)."""
-    counts: Counter[str] = Counter()
-    for word in _WORD.findall(strip_markdown(text).lower()):
-        if word not in STOPWORDS:
-            counts[stem(word)] += 1
-    return counts
+    return Counter(stem(word) for word in _tokens(text))
 
 
 def headings(text: str) -> tuple[str, ...]:
@@ -141,8 +163,46 @@ def keywords(text: str, *, limit: int = 40) -> tuple[str, ...]:
 
 
 def normalise_phrase(text: str) -> str:
-    """A lowercased, whitespace-collapsed form used for exact-phrase checks."""
-    return " ".join((text or "").lower().split())
+    """A lowercased, whitespace-collapsed form used for exact-phrase checks.
+
+    Separators and camelCase are normalised too, so the phrase ``rollback plan`` is found inside
+    ``rollback-plan`` and ``releaseNotes`` reads as ``release notes``.
+    """
+    value = _CAMEL_BOUNDARY.sub(" ", text or "")
+    value = _SEPARATORS.sub(" ", value)
+    return " ".join(value.lower().split())
+
+
+#: One code span or URL inside prose. Their punctuation is meaningful, so it is preserved.
+_PROTECTED = re.compile(r"`[^`]*`|https?://\S+")
+#: Placeholder that cannot appear in a description (a NUL byte survives split/join untouched).
+_PLACEHOLDER = "\x00{}\x00"
+
+
+def naturalise_description(text: str) -> str:
+    """Rewrite a description as plain prose, without compound identifiers.
+
+    A folder description is the index a search matches on, so it must read the way somebody
+    types: ``rollback plan``, not ``rollback-plan`` or ``rollback_plan``. Only the separators are
+    changed — every word is kept, nothing is reordered, and no model is involved. camelCase is
+    left alone on purpose, because ``OAuth`` and ``iOS`` must not become ``O Auth`` and ``i OS``.
+
+    Text inside backticks and URLs is left exactly as written: ``X-RateLimit`` or
+    ``request_id`` are identifiers, and the matcher splits them into words anyway.
+    """
+    protected: list[str] = []
+
+    def keep(match: re.Match[str]) -> str:
+        protected.append(match.group(0))
+        return _PLACEHOLDER.format(len(protected) - 1)
+
+    value = _PROTECTED.sub(keep, text or "")
+    value = _SEPARATORS.sub(" ", value)
+    value = re.sub(r"\s+([,.;:!?])", r"\1", value)
+    value = " ".join(value.split())
+    for index, original in enumerate(protected):
+        value = value.replace(_PLACEHOLDER.format(index), original)
+    return value
 
 
 def document_frequencies(texts: Iterable[str]) -> Counter[str]:
@@ -221,7 +281,7 @@ def build_query(text: str, corpus: Sequence[str] = ()) -> Query:
             originals.setdefault(stem(word), word)
     return Query(
         text=cleaned,
-        terms=terms(cleaned),
+        terms=terms(cleaned, compounds=False),
         phrase=normalise_phrase(cleaned),
         idf=idf,
         default_weight=default_weight,
@@ -243,7 +303,7 @@ class ScoreConfig:
     document_body_weight: float = 0.85
     document_name_weight: float = 0.15
     phrase_bonus: float = 0.15
-    version: str = "local-1"
+    version: str = "local-2"
 
 
 def score_folder_texts(
@@ -288,12 +348,14 @@ def score_document_texts(
 
 
 def clip_description(text: str, limit: int = 300) -> str:
-    """Collapse whitespace and cut a folder description to a hard character limit.
+    """Write a folder description as prose, then cut it to a hard character limit.
 
-    The cut lands on the last word boundary that fits and the ellipsis counts towards the
-    limit, so the result is always ``len(result) <= limit``.
+    Naturalising happens here because every stored description passes through this function
+    (Graph Creation and the refresh after a placement), so a hyphenated identifier cannot reach
+    the database from either path. The cut lands on the last word boundary that fits and the
+    ellipsis counts towards the limit, so the result is always ``len(result) <= limit``.
     """
-    collapsed = " ".join((text or "").split())
+    collapsed = naturalise_description(text)
     if limit <= 0:
         return ""
     if len(collapsed) <= limit:

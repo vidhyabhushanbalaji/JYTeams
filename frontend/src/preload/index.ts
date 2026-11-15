@@ -2,7 +2,16 @@
 
 import { contextBridge, ipcRenderer } from 'electron'
 
-import type { AppConfig, FileContentInput, JyTeamsApi, PlacementInput, XYPosition } from '../shared/types'
+import type {
+  AppConfig,
+  FileContentInput,
+  JyTeamsApi,
+  PlacementInput,
+  TicketInput,
+  TicketPatch,
+  TicketStatus,
+  XYPosition
+} from '../shared/types'
 
 const api: JyTeamsApi = {
   config: {
@@ -36,12 +45,35 @@ const api: JyTeamsApi = {
   },
   add: {
     pickFile: () => ipcRenderer.invoke('add:pick-file'),
-    suggest: (input: { projectId: string; filePath: string }) => ipcRenderer.invoke('add:suggest', input),
+    suggest: (input: { projectId: string; filePath: string; context?: string }) =>
+      ipcRenderer.invoke('add:suggest', input),
     place: (input: PlacementInput) => ipcRenderer.invoke('add:place', input)
   },
   search: {
     run: (input: { projectId: string; query: string; limit?: number }) =>
       ipcRenderer.invoke('search:run', input)
+  },
+  tickets: {
+    members: () => ipcRenderer.invoke('tickets:members'),
+    signIn: (displayName: string) => ipcRenderer.invoke('tickets:sign-in', displayName),
+    me: () => ipcRenderer.invoke('tickets:me'),
+    list: (input) => ipcRenderer.invoke('tickets:list', input),
+    create: (input: TicketInput) => ipcRenderer.invoke('tickets:create', input),
+    get: (ticketId: string, refresh = false) => ipcRenderer.invoke('tickets:get', ticketId, refresh),
+    update: (ticketId: string, patch: TicketPatch) => ipcRenderer.invoke('tickets:update', ticketId, patch),
+    setStatus: (ticketId: string, status: TicketStatus) =>
+      ipcRenderer.invoke('tickets:status', ticketId, status),
+    files: (ticketId: string, refresh = false) =>
+      ipcRenderer.invoke('tickets:files', ticketId, refresh),
+    attach: (ticketId: string, fileId: string, source: 'upload' | 'existing' = 'existing') =>
+      ipcRenderer.invoke('tickets:attach', ticketId, fileId, source),
+    detach: (ticketId: string, fileId: string) => ipcRenderer.invoke('tickets:detach', ticketId, fileId),
+    comment: (ticketId: string, body: string) => ipcRenderer.invoke('tickets:comment', ticketId, body),
+    activity: (input) => ipcRenderer.invoke('tickets:activity', input),
+    projectMembers: (projectId: string) => ipcRenderer.invoke('tickets:project-members', projectId),
+    share: (projectId: string, memberId: string) => ipcRenderer.invoke('tickets:share', projectId, memberId),
+    unshare: (projectId: string, memberId: string) =>
+      ipcRenderer.invoke('tickets:unshare', projectId, memberId)
   },
   shell: {
     openExternal: (url: string) => ipcRenderer.invoke('shell:open-external', url)

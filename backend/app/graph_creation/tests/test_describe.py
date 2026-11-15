@@ -208,6 +208,21 @@ async def test_the_prompt_carries_the_file_text_and_the_child_descriptions() -> 
     assert "at most 300 characters" in prompt
 
 
+async def test_the_prompt_asks_for_plain_prose_without_compound_identifiers() -> None:
+    models = _ScriptedModels({"m": [_Response("Described.")]})
+    describer = _describer(models, model="m")
+
+    await describer.describe_directory(
+        path="operations",
+        files=[("rollback-runbook.md", "# Rollback runbook\n\nRevert a release.")],
+        directories=[],
+    )
+
+    prompt = models.prompts[0]
+    assert "never use hyphens, underscores or run-together identifiers" in prompt
+    assert "'rollback plan', not 'rollback-plan'" in prompt
+
+
 def test_trim_for_prompt_caps_each_file_and_the_folder_total() -> None:
     files = [("a.md", "x" * 5000), ("b.md", "y" * 5000)]
 

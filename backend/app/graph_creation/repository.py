@@ -60,6 +60,12 @@ class GraphRepository(Protocol):
 
     async def list_projects(self, owner_id: str) -> list[Row]: ...
 
+    async def list_projects_by_ids(self, project_ids: list[str]) -> list[Row]: ...
+
+    async def add_project_member(
+        self, *, project_id: str, member_id: str, role: str, added_by: str | None
+    ) -> Row: ...
+
     async def create_job(
         self, *, project_id: str, owner_id: str, mode: str, total_files: int
     ) -> Row: ...
@@ -134,6 +140,48 @@ class SupabaseGraphRepository:
                 .execute()
             )
             return response.data or []
+
+        return await self._run(run)
+
+    async def list_projects_by_ids(self, project_ids: list[str]) -> list[Row]:
+        """Projects the caller is a member of (the id list comes from ``ProjectAccess``)."""
+        if not project_ids:
+            return []
+
+        def run() -> list[Row]:
+            response = (
+                admin_client()
+                .table("projects")
+                .select("*")
+                .in_("id", project_ids)
+                .order("created_at", desc=True)
+                .execute()
+            )
+            return response.data or []
+
+        return await self._run(run)
+
+    async def add_project_member(
+        self, *, project_id: str, member_id: str, role: str, added_by: str | None
+    ) -> Row:
+        """Record that a member can see a project (the creator becomes its owner)."""
+
+        def run() -> Row:
+            response = (
+                admin_client()
+                .table("project_members")
+                .upsert(
+                    {
+                        "project_id": project_id,
+                        "member_id": member_id,
+                        "role": role,
+                        "added_by": added_by,
+                    },
+                    on_conflict="project_id,member_id",
+                )
+                .execute()
+            )
+            return response.data[0]
 
         return await self._run(run)
 

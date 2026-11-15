@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app.graph_add.navigate import ChildBrief, score_folders
 from app.graph_add.scoring import QUERY_TERM_BUDGET, document_query
 
 BODY = """# Rollback runbook
@@ -16,6 +17,39 @@ def test_the_query_carries_the_title_and_the_file_name() -> None:
 
     assert {"rollback", "runbook"} <= query.terms
     assert "rollback" in query.originals.values()
+
+
+def test_a_compound_file_name_answers_the_separated_words() -> None:
+    for name in ("rollback-plan.md", "rollback_plan.md", "rollbackPlan.md"):
+        query = document_query(file_name=name, text="# Notes\n\nRecovery steps.")
+
+        assert {"rollback", "plan"} <= query.terms, name
+
+
+def test_a_compound_name_ranks_a_natural_language_folder() -> None:
+    scan = score_folders(
+        folders=[
+            ChildBrief(
+                directory_id="dir-operations",
+                path="operations",
+                name="operations",
+                depth=1,
+                description="Rollback plans and recovery steps for a failed release.",
+            ),
+            ChildBrief(
+                directory_id="dir-product",
+                path="product",
+                name="product",
+                depth=1,
+                description="Roadmap, personas and frequently asked questions.",
+            ),
+        ],
+        query=document_query(file_name="rollback-plan.md", text="# Notes\n\nRecovery steps."),
+        file_name="rollback-plan.md",
+        root_id="dir-root",
+    )
+
+    assert scan.locations[0].node.directory_id == "dir-operations"
 
 
 def test_the_query_stays_compact_for_a_long_document() -> None:

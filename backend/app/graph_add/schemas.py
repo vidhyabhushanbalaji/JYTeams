@@ -65,6 +65,8 @@ class SuggestionAccepted(BaseModel):
     project_id: str
     status: str = "suggested"
     expires_at: datetime | None = None
+    #: The surrounding context that was allowed to steer the ranking (usually a ticket).
+    context: str = ""
     file: FileBrief
     suggestions: list[Suggestion] = Field(default_factory=list)
     scan: ScanInfo

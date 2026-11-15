@@ -19,6 +19,7 @@ from pathlib import PurePosixPath
 
 from fastapi import HTTPException, status
 
+from app.core.access import ProjectAccess
 from app.core.config import Settings
 from app.core.text import build_query
 from app.graph_ai_search.repository import Row, SearchRepository
@@ -139,11 +140,15 @@ class GraphSearchService:
         reader: DocumentTextReader,
         scorer: Scorer,
         settings: Settings,
+        access: ProjectAccess | None = None,
     ) -> None:
         self._repository = repository
         self._reader = reader
         self._scorer = scorer
         self._settings = settings
+        #: Wired by the router. ``None`` keeps the pre-sharing owner check for unit tests;
+        #: project membership is what the app uses.
+        self._access = access
 
     async def search(
         self,
@@ -280,7 +285,17 @@ class GraphSearchService:
             )
 
     async def _require_project(self, project_id: str, owner_id: str) -> Row:
+        """One project, with the caller's access checked (404 for either miss).
+
+        ``owner_id`` is the caller's member id. With an access guard the check is project
+        membership, so a shared project is searchable; without one it is the original owner
+        comparison, which is what the section's unit tests set up.
+        """
         project = await self._repository.get_project(project_id)
-        if project is None or project.get("owner_id") != owner_id:
+        if project is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+        if self._access is not None:
+            await self._access.require(project_id, owner_id)
+        elif project.get("owner_id") != owner_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
         return project

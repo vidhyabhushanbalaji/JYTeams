@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 
 import type { FileSaved, PlacementResult, SearchHit } from '@shared/types'
 
 import { describeError } from '../lib/errors'
 import { fileNodeId } from '../lib/focusGraph'
+import { focusForFile, type TicketFocus } from '../lib/ticketFocus'
+import { stepIndex } from '../lib/tickets'
 import { useFocusGraph } from '../state/useFocusGraph'
 import { useSearch } from '../state/useSearch'
 import { AddDocumentFlow } from './AddDocumentFlow'
@@ -15,10 +17,15 @@ import { Spinner } from './primitives'
 
 export function ProjectScreen({
   projectId,
+  ticketFocus,
+  onClearTicketFocus,
   onOpenSettings,
   notify
 }: {
   projectId: string
+  /** The files a ticket asked the graph to highlight, and which one to open first. */
+  ticketFocus: TicketFocus | null
+  onClearTicketFocus: () => void
   onOpenSettings: () => void
   notify: (message: string, tone?: 'info' | 'error') => void
 }) {
@@ -28,6 +35,8 @@ export function ProjectScreen({
   const [query, setQuery] = useState('')
   const [adding, setAdding] = useState(false)
   const [openFileId, setOpenFileId] = useState<string | null>(null)
+  const [matchIndex, setMatchIndex] = useState(0)
+  const appliedFocus = useRef<string | null>(null)
 
   const view = graph.view
 
@@ -39,8 +48,36 @@ export function ProjectScreen({
   const hits = useMemo(() => {
     const found = new Set<string>()
     for (const hit of search.results?.results ?? []) found.add(fileNodeId(hit.file_id))
+    for (const target of ticketFocus?.targets ?? []) found.add(fileNodeId(target.fileId))
     return found
-  }, [search.results])
+  }, [search.results, ticketFocus])
+
+  // A ticket hands the graph a set of files: open the one that was pressed, highlight the rest.
+  const revealTicketFocus = graph.revealPath
+  const focusNode = graph.focusNode
+  useEffect(() => {
+    if (!ticketFocus || graph.status !== 'ready') return
+    const key = `${ticketFocus.label}|${ticketFocus.entryFileId}`
+    if (appliedFocus.current === key) return
+    const entry =
+      focusForFile(ticketFocus, ticketFocus.entryFileId) ?? ticketFocus.targets[0] ?? null
+    if (!entry) return
+    appliedFocus.current = key
+    setMatchIndex(Math.max(0, ticketFocus.targets.findIndex((item) => item.fileId === entry.fileId)))
+    void (async () => {
+      await revealTicketFocus(entry.directoryPath)
+      focusNode(fileNodeId(entry.fileId))
+    })()
+  }, [ticketFocus, graph.status, revealTicketFocus, focusNode])
+
+  const stepMatch = async (direction: 1 | -1): Promise<void> => {
+    if (!ticketFocus || ticketFocus.targets.length === 0) return
+    const next = stepIndex(matchIndex, ticketFocus.targets.length, direction)
+    setMatchIndex(next)
+    const target = ticketFocus.targets[next]
+    await graph.revealPath(target.directoryPath)
+    graph.focusNode(fileNodeId(target.fileId))
+  }
 
   useEffect(() => {
     if (!graph.actionError) return
@@ -145,6 +182,40 @@ export function ProjectScreen({
 
       <div className="workspace">
         <div className="workspace__canvas">
+          {ticketFocus ? (
+            <div className="ticket-strip">
+              <span className="ticket-strip__label">{ticketFocus.label}</span>
+              <span className="ticket-strip__count">
+                {ticketFocus.targets.length > 0
+                  ? `${matchIndex + 1} of ${ticketFocus.targets.length} ticket files`
+                  : 'no files on this ticket'}
+              </span>
+              <div className="ticket-strip__actions">
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--sm"
+                  onClick={() => void stepMatch(-1)}
+                  disabled={ticketFocus.targets.length < 2}
+                  aria-label="Previous ticket file"
+                >
+                  {'\u2039'}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--sm"
+                  onClick={() => void stepMatch(1)}
+                  disabled={ticketFocus.targets.length < 2}
+                  aria-label="Next ticket file"
+                >
+                  {'\u203a'}
+                </button>
+                <button type="button" className="btn btn--ghost btn--sm" onClick={onClearTicketFocus}>
+                  Clear
+                </button>
+              </div>
+            </div>
+          ) : null}
+
           {graph.status === 'loading' ? (
             <div className="canvas__state">
               <Spinner label="Opening the project" />
@@ -192,7 +263,10 @@ export function ProjectScreen({
                     focus={graph.focus}
                     busyId={graph.busyId}
                     hits={hits}
-                    dimmed={search.results !== null && search.results.results.length > 0}
+                    dimmed={
+                      (search.results !== null && search.results.results.length > 0) ||
+                      Boolean(ticketFocus?.targets.length)
+                    }
                     onSelect={graph.select}
                     onOpen={openFolder}
                     onOpenFile={setOpenFileId}

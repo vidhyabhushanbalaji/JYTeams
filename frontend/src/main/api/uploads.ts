@@ -50,12 +50,14 @@ export async function inspectFile(filePath: string): Promise<PickedFile> {
 export async function suggestPlacement(input: {
   projectId: string
   filePath: string
+  context?: string
 }): Promise<SuggestionAccepted> {
   const bytes = await readFile(input.filePath)
   if (bytes.length === 0) throw new Error('That file is empty.')
 
   const form = new FormData()
   form.append('project_id', input.projectId)
+  if (input.context) form.append('context', input.context)
   form.append('file', new File([bytes], basename(input.filePath), { type: 'text/markdown' }))
 
   return request<SuggestionAccepted>('/api/graph-add/suggestions', {

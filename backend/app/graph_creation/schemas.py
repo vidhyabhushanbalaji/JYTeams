@@ -52,6 +52,8 @@ class ProjectOut(BaseModel):
     description: str | None = None
     root_directory_id: str | None = None
     created_at: datetime | None = None
+    #: The caller's role: ``owner`` (they created it) or ``member`` (it was shared with them).
+    role: str = "owner"
 
 
 class JobOut(BaseModel):

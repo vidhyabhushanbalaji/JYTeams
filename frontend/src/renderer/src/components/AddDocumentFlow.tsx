@@ -34,11 +34,14 @@ function conflictTarget(error: ApiError): 'file' | 'folder' {
 export function AddDocumentFlow({
   open,
   projectId,
+  context,
   onClose,
   onPlaced
 }: {
   open: boolean
   projectId: string
+  /** A ticket's title and description, which may steer the ranking (optional). */
+  context?: string
   onClose: () => void
   onPlaced: (result: PlacementResult) => void
 }) {
@@ -78,7 +81,11 @@ export function AddDocumentFlow({
     setFile(picked)
     setError(null)
     setStep('suggesting')
-    const result = await window.jyteams.add.suggest({ projectId, filePath: picked.path })
+    const result = await window.jyteams.add.suggest({
+      projectId,
+      filePath: picked.path,
+      context
+    })
     if (!result.ok) {
       setError(result.error)
       setStep('error')

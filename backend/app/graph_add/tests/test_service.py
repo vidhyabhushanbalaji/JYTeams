@@ -188,8 +188,8 @@ async def test_a_direct_placement_refreshes_the_chain_in_one_call() -> None:
 
     directories = {row["path"]: row for row in await repository.list_directories(project["id"])}
     assert directories["guides"]["direct_file_count"] == 2
-    assert "rollback-runbook.md" in directories["guides"]["description"]
-    assert "rollback-runbook.md" in directories[""]["description"]
+    assert "rollback runbook" in directories["guides"]["description"]
+    assert "rollback runbook" in directories[""]["description"]
     project_row = await repository.get_project(project["id"])
     assert project_row["description"] == directories[""]["description"]
 

@@ -22,6 +22,8 @@ from pathlib import PurePosixPath
 
 from fastapi import HTTPException, status
 
+from app.core.access import ProjectAccess
+from app.core.activity import FILE_ADDED, NOOP, ActivityLog
 from app.core.config import Settings
 from app.core.text import clip_description
 from app.graph_add.describer import DocumentContext, FolderDescriber, TargetContext
@@ -44,7 +46,7 @@ from app.graph_add.navigate import (
 )
 from app.graph_add.repository import AddRepository, Row
 from app.graph_add.schemas import PlacementMode
-from app.graph_add.scoring import document_query
+from app.graph_add.scoring import context_query, document_query
 from app.graph_add.storage import ObjectStore, content_hash
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,8 @@ _MIME = "text/markdown"
 _MAX_IDENTICAL = 5
 _CONTAINS_LIMIT = 6
 _PREVIEW_CHARS = 200
+#: Characters of surrounding context that may steer a placement (a ticket's description).
+_MAX_CONTEXT_CHARS = 500
 _DEFAULT_SCAN = {
     "folders_scored": 0,
     "threshold": 0.0,
@@ -150,16 +154,34 @@ class GraphAddService:
         store: ObjectStore,
         describer: FolderDescriber,
         settings: Settings,
+        access: ProjectAccess | None = None,
+        activity: ActivityLog = NOOP,
     ) -> None:
         self._repository = repository
         self._store = store
         self._describer = describer
         self._settings = settings
+        #: Wired by the router. ``None`` keeps the pre-sharing owner check for unit tests;
+        #: project membership is what the app uses.
+        self._access = access
+        self._activity = activity
 
     # ---------------------------------------------------------------- suggest
 
-    async def suggest(self, *, owner_id: str, project_id: str, filename: str, data: bytes) -> Row:
-        """Rank the folders this document could join — locally, with no model call."""
+    async def suggest(
+        self,
+        *,
+        owner_id: str,
+        project_id: str,
+        filename: str,
+        data: bytes,
+        context: str = "",
+    ) -> Row:
+        """Rank the folders this document could join — locally, with no model call.
+
+        ``context`` (a ticket's title and description, for instance) is scored alongside the
+        document at a lower weight, so it can steer the choice without overriding the file.
+        """
         name = self._document_name(filename)
         extracted = extract_text(
             data, filename=name, max_chars=self._settings.summary_max_input_chars
@@ -180,11 +202,13 @@ class GraphAddService:
             )
 
         text = extracted.text or ""
+        hint = " ".join((context or "").split())[:_MAX_CONTEXT_CHARS]
         scan = score_folders(
             folders=[_brief(row, index.contains_of(str(row["id"]))) for row in index.directories],
             query=document_query(file_name=name, text=text, corpus=index.corpus()),
             file_name=name,
             root_id=str(root_row["id"]),
+            context=context_query(hint, corpus=index.corpus()),
         )
         preview = self._preview(name, text)
 
@@ -219,6 +243,7 @@ class GraphAddService:
             "project_id": project["id"],
             "status": "suggested",
             "expires_at": request.get("expires_at"),
+            "context": hint,
             "file": {
                 "name": name,
                 "size_bytes": len(data),
@@ -399,6 +424,13 @@ class GraphAddService:
         )
         await self._repository.update_add_request(
             request_id, {"status": "placed", "placed_file_id": inserted["id"]}
+        )
+        await self._record_placement(
+            project_id=project_id,
+            member_id=owner_id,
+            inserted=inserted,
+            directory_path=str(directory_row.get("path", "")),
+            created_directory=created is not None,
         )
         return {
             "project_id": project_id,
@@ -619,10 +651,46 @@ class GraphAddService:
             ) from exc
 
     async def _require_project(self, project_id: str, owner_id: str) -> Row:
+        """One project, with the caller's access checked (404 for either miss).
+
+        ``owner_id`` is the caller's member id. With an access guard the check is project
+        membership, so a shared project can be added to; without one it is the original owner
+        comparison, which is what the section's unit tests set up.
+        """
         project = await self._repository.get_project(project_id)
-        if project is None or project.get("owner_id") != owner_id:
+        if project is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+        if self._access is not None:
+            await self._access.require(project_id, owner_id)
+        elif project.get("owner_id") != owner_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
         return project
+
+    async def _record_placement(
+        self,
+        *,
+        project_id: str,
+        member_id: str,
+        inserted: Row,
+        directory_path: str,
+        created_directory: bool,
+    ) -> None:
+        """Feed the project's activity log. Never raises: the file row is already written."""
+        try:
+            await self._activity.record(
+                project_id=project_id,
+                member_id=member_id,
+                kind=FILE_ADDED,
+                detail={
+                    "file_id": str(inserted["id"]),
+                    "file_name": str(inserted.get("name") or ""),
+                    "path": str(inserted.get("path") or ""),
+                    "directory_path": directory_path,
+                    "created_directory": created_directory,
+                },
+            )
+        except Exception:  # noqa: BLE001 - an audit row must not undo a placement
+            logger.warning("Could not record the placement event for %s", inserted["id"])
 
     async def _load_index(self, project_id: str) -> _DocumentIndex:
         directories = await self._repository.list_directories(project_id)

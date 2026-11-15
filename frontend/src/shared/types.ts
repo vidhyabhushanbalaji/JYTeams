@@ -19,6 +19,8 @@ export interface Project {
   description: string | null
   root_directory_id: string | null
   created_at: string | null
+  /** The caller's role: they created it, or it was shared with them. */
+  role: 'owner' | 'member'
 }
 
 export interface ProjectFile {
@@ -143,6 +145,8 @@ export interface SuggestionAccepted {
   project_id: string
   status: string
   expires_at: string | null
+  /** The ticket (or other) context that was allowed to steer the ranking. */
+  context: string
   file: DocumentBrief
   suggestions: AddSuggestion[]
   scan: ScanInfo
@@ -229,6 +233,123 @@ export interface SearchResults {
   traversal: SearchTraversal
 }
 
+/* ------------------------------------------------------------------ tickets */
+
+export type TicketStatus = 'todo' | 'in_progress' | 'done'
+export type TicketPriority = 'low' | 'medium' | 'high'
+
+/** A person, by name — the only identity this build has. */
+export interface Member {
+  id: string
+  display_name: string
+}
+
+export interface ProjectMember extends Member {
+  role: 'owner' | 'member'
+  added_at: string | null
+}
+
+/** One document Graph AI Search found for a ticket. */
+export interface TicketFileHit {
+  file_id: string
+  name: string
+  path: string
+  directory_id: string
+  directory_path: string
+  score: number
+  matched_terms: string[]
+  excerpt: string
+}
+
+/** A document deliberately put on the ticket. */
+export interface AttachedFile {
+  file_id: string
+  name: string
+  path: string
+  directory_path: string
+  size_bytes: number
+  added_at: string | null
+  added_by: Member | null
+  source: 'upload' | 'existing' | string
+}
+
+export interface TicketFiles {
+  query: string
+  context: string
+  suggested: TicketFileHit[]
+  attached: AttachedFile[]
+  /** When the cached search last ran. */
+  cached_at: string | null
+  /** The stored result no longer matches the ticket or the project. */
+  stale: boolean
+  /** Why there is nothing to suggest (for example a ticket with no description). */
+  reason: string | null
+}
+
+export interface Ticket {
+  id: string
+  project_id: string
+  project_name: string
+  number: number
+  title: string
+  description: string
+  status: TicketStatus
+  priority: TicketPriority
+  due_date: string | null
+  labels: string[]
+  assignee: Member | null
+  reporter: Member | null
+  completed_at: string | null
+  completed_by: Member | null
+  attachment_count: number
+  comment_count: number
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface TicketComment {
+  id: string
+  body: string
+  author: Member | null
+  created_at: string | null
+}
+
+export interface TicketDetail extends Ticket {
+  comments: TicketComment[]
+  files: TicketFiles
+}
+
+export interface TicketInput {
+  projectId: string
+  title: string
+  description?: string
+  assigneeId?: string | null
+  priority?: TicketPriority
+  dueDate?: string | null
+  labels?: string[]
+}
+
+export interface TicketPatch {
+  title?: string
+  description?: string
+  assigneeId?: string | null
+  priority?: TicketPriority
+  dueDate?: string | null
+  labels?: string[]
+}
+
+/** One line of the changes-and-updates feed. */
+export interface TicketEvent {
+  id: string
+  kind: string
+  detail: Record<string, unknown>
+  project_id: string
+  ticket_id: string | null
+  ticket_number: number | null
+  actor: Member | null
+  created_at: string | null
+}
+
 /** A failure normalised by the main process; never thrown across IPC. */
 export interface ApiError {
   /** HTTP status, or 0 when the backend could not be reached at all. */
@@ -300,11 +421,47 @@ export interface JyTeamsApi {
   }
   add: {
     pickFile(): Promise<PickedFile | null>
-    suggest(input: { projectId: string; filePath: string }): Promise<ApiResult<SuggestionAccepted>>
+    suggest(input: {
+      projectId: string
+      filePath: string
+      /** A ticket's title and description, which may steer the ranking. */
+      context?: string
+    }): Promise<ApiResult<SuggestionAccepted>>
     place(input: PlacementInput): Promise<ApiResult<PlacementResult>>
   }
   search: {
     run(input: { projectId: string; query: string; limit?: number }): Promise<ApiResult<SearchResults>>
+  }
+  tickets: {
+    members(): Promise<ApiResult<Member[]>>
+    signIn(displayName: string): Promise<ApiResult<Member>>
+    me(): Promise<ApiResult<Member>>
+    list(input: {
+      scope?: 'mine' | 'project'
+      projectId?: string
+      status?: TicketStatus | null
+      limit?: number
+    }): Promise<ApiResult<Ticket[]>>
+    create(input: TicketInput): Promise<ApiResult<Ticket>>
+    get(ticketId: string, refresh?: boolean): Promise<ApiResult<TicketDetail>>
+    update(ticketId: string, patch: TicketPatch): Promise<ApiResult<Ticket>>
+    setStatus(ticketId: string, status: TicketStatus): Promise<ApiResult<Ticket>>
+    files(ticketId: string, refresh?: boolean): Promise<ApiResult<TicketFiles>>
+    attach(
+      ticketId: string,
+      fileId: string,
+      source?: 'upload' | 'existing'
+    ): Promise<ApiResult<TicketFiles>>
+    detach(ticketId: string, fileId: string): Promise<ApiResult<null>>
+    comment(ticketId: string, body: string): Promise<ApiResult<TicketComment>>
+    activity(input: {
+      projectId?: string
+      ticketId?: string
+      limit?: number
+    }): Promise<ApiResult<TicketEvent[]>>
+    projectMembers(projectId: string): Promise<ApiResult<ProjectMember[]>>
+    share(projectId: string, memberId: string): Promise<ApiResult<Member>>
+    unshare(projectId: string, memberId: string): Promise<ApiResult<null>>
   }
   shell: {
     openExternal(url: string): Promise<void>

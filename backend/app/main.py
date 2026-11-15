@@ -20,6 +20,7 @@ from app.graph_add.router import router as graph_add_router
 from app.graph_ai_search.router import router as graph_ai_search_router
 from app.graph_creation.router import router as graph_creation_router
 from app.health.router import router as health_router
+from app.tickets.router import router as tickets_router
 
 API_TITLE = "JYTeams API"
 
@@ -28,6 +29,7 @@ SECTION_ROUTERS: tuple[tuple[str, APIRouter], ...] = (
     ("graph-creation", graph_creation_router),
     ("graph-add", graph_add_router),
     ("graph-ai-search", graph_ai_search_router),
+    ("tickets", tickets_router),
 )
 
 

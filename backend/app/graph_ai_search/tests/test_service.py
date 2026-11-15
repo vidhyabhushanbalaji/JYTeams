@@ -231,3 +231,38 @@ async def test_an_unreadable_document_degrades_the_response() -> None:
 
     assert payload["results"] == []
     assert payload["traversal"]["degraded"] is True
+
+
+@pytest.mark.parametrize(
+    ("file_name", "description"),
+    [
+        ("rollback-plan.md", "Rollback plans and recovery steps for a failed release."),
+        ("rollback_plan.md", "Rollback plans and recovery steps for a failed release."),
+        ("rollbackPlan.md", "Rollback plans and recovery steps for a failed release."),
+        # Legacy descriptions written before the prose rule still match.
+        ("rollback-plan.md", "Rollback-plan and recovery steps for a failed release."),
+    ],
+)
+async def test_a_spaced_query_finds_a_compound_document_name(
+    file_name: str, description: str
+) -> None:
+    repository = InMemorySearchRepository()
+    project = repository.seed_project()
+    operations = repository.seed_directory(
+        project["id"],
+        parent_id=project["root_directory_id"],
+        name="operations",
+        description=description,
+    )
+    repository.seed_file(
+        project["id"],
+        directory_id=operations["id"],
+        name=file_name,
+        body="# Release recovery\n\nBring the previous release back, then smoke test it.",
+    )
+    service, _ = _service(repository)
+
+    payload = await _search(service, project, query="rollback plan")
+
+    assert [hit["name"] for hit in payload["results"]] == [file_name]
+    assert payload["results"][0]["matched_terms"] == ["plan", "rollback"]

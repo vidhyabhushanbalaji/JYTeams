@@ -104,6 +104,29 @@ export function toApiError(error: unknown): ApiError {
   return { status: 0, message: error instanceof Error ? error.message : String(error), detail: null }
 }
 
+/** A request that answers 204 (no body): success yields `null`, not a parse error. */
+export async function requestVoid(path: string, options: RequestOptions = {}): Promise<null> {
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, headers, ...rest } = options
+  let response: Response
+  try {
+    response = await fetch(apiUrl(path), {
+      ...rest,
+      headers: {
+        Accept: 'application/json',
+        ...authHeaders(),
+        ...(headers as Record<string, string> | undefined)
+      },
+      signal: AbortSignal.timeout(timeoutMs)
+    })
+  } catch (error) {
+    throw new HttpError(0, unreachable(error), null)
+  }
+
+  if (response.ok) return null
+  const body = await readJson(response)
+  throw new HttpError(response.status, messageFrom(response.status, body), detailOf(body))
+}
+
 /** Run a call and hand the renderer a value or a normalised error - never a throw. */
 export async function run<T>(work: () => Promise<T>): Promise<ApiResult<T>> {
   try {

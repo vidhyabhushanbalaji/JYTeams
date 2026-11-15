@@ -12,25 +12,23 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 
+from app.core.access import SupabaseProjectAccess
+from app.core.activity import SupabaseActivityLog
 from app.core.auth import CurrentUser, get_current_user
 from app.core.config import get_settings
-from app.graph_add.describer import build_describer
-from app.graph_add.repository import SupabaseAddRepository
+from app.graph_add.public import build_service
 from app.graph_add.schemas import PlacementIn, PlacementOut, SuggestionAccepted
 from app.graph_add.service import GraphAddService
-from app.graph_add.storage import SupabaseObjectStore
 
 router = APIRouter(tags=["Graph Add"])
 
 
 def get_service() -> GraphAddService:
-    """Wire the service for a request (Supabase repository + storage + folder describer)."""
-    settings = get_settings()
-    return GraphAddService(
-        repository=SupabaseAddRepository(),
-        store=SupabaseObjectStore(bucket=settings.storage_bucket),
-        describer=build_describer(settings),
-        settings=settings,
+    """Wire the service for a request (Supabase repository + storage + describer + membership)."""
+    return build_service(
+        get_settings(),
+        access=SupabaseProjectAccess(),
+        activity=SupabaseActivityLog(),
     )
 
 
@@ -51,6 +49,15 @@ async def create_suggestion(
         File(description="A single markdown document (.md, .markdown or .mdx)."),
     ],
     project_id: Annotated[str, Form(description="Project the document should join.")],
+    context: Annotated[
+        str,
+        Form(
+            description=(
+                "Optional context that may steer the ranking, e.g. a ticket's title and "
+                "description. The document keeps full weight; context is a weaker signal."
+            )
+        ),
+    ] = "",
 ) -> SuggestionAccepted:
     settings = get_settings()
     data = await file.read()
@@ -69,6 +76,7 @@ async def create_suggestion(
         project_id=project_id,
         filename=file.filename or "",
         data=data,
+        context=context,
     )
     return SuggestionAccepted(**result)
 

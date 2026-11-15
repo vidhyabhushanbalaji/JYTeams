@@ -76,6 +76,7 @@ def test_suggest_returns_ranked_suggestions(api: TestClient, seeded) -> None:
         "project_id",
         "status",
         "expires_at",
+        "context",
         "file",
         "suggestions",
         "scan",

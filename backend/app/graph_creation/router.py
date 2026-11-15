@@ -12,6 +12,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 
+from app.core.access import SupabaseProjectAccess
+from app.core.activity import SupabaseActivityLog
 from app.core.auth import CurrentUser, get_current_user
 from app.core.config import get_settings
 from app.graph_creation.describe import build_describer
@@ -36,13 +38,15 @@ router = APIRouter(tags=["Graph Creation"])
 
 
 def get_service() -> GraphCreationService:
-    """Wire the service for a request (Supabase repository + storage + describer)."""
+    """Wire the service for a request (Supabase repository + storage + describer + membership)."""
     settings = get_settings()
     return GraphCreationService(
         repository=SupabaseGraphRepository(),
         store=SupabaseObjectStore(bucket=settings.storage_bucket),
         describer=build_describer(settings),
         settings=settings,
+        access=SupabaseProjectAccess(),
+        activity=SupabaseActivityLog(),
     )
 
 

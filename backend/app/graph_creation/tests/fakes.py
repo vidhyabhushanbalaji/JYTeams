@@ -5,6 +5,8 @@ from __future__ import annotations
 import itertools
 from typing import Any
 
+from app.core.access import ProjectAccess, ProjectRole
+from app.core.activity import ActivityLog
 from app.graph_creation.describe import Description, MockDescriber
 from app.graph_creation.storage import StorageError, StoredObject
 
@@ -19,6 +21,8 @@ class InMemoryGraphRepository:
         self.directories: dict[str, Row] = {}
         self.files: dict[str, Row] = {}
         self.jobs: dict[str, Row] = {}
+        #: (project_id, member_id) -> role, the way ``project_members`` stores it.
+        self.memberships: dict[tuple[str, str], str] = {}
         self._ids = itertools.count(1)
 
     def _next(self, prefix: str) -> str:
@@ -45,6 +49,21 @@ class InMemoryGraphRepository:
 
     async def list_projects(self, owner_id: str) -> list[Row]:
         return [dict(row) for row in self.projects.values() if row["owner_id"] == owner_id]
+
+    async def list_projects_by_ids(self, project_ids: list[str]) -> list[Row]:
+        wanted = set(project_ids)
+        return [dict(row) for row in self.projects.values() if row["id"] in wanted]
+
+    async def add_project_member(
+        self, *, project_id: str, member_id: str, role: str, added_by: str | None
+    ) -> Row:
+        self.memberships[(project_id, member_id)] = role
+        return {
+            "project_id": project_id,
+            "member_id": member_id,
+            "role": role,
+            "added_by": added_by,
+        }
 
     async def create_job(
         self, *, project_id: str, owner_id: str, mode: str, total_files: int
@@ -143,3 +162,47 @@ class RecordingDescriber(MockDescriber):
     async def describe_directory(self, *, path: str, files: Any, directories: Any) -> Description:
         self.calls.append(("directory", path))
         return await super().describe_directory(path=path, files=files, directories=directories)
+
+
+class FakeProjectAccess(ProjectAccess):
+    """Membership held in a dict, shaped like ``project_members``."""
+
+    def __init__(self, roles: dict[tuple[str, str], ProjectRole] | None = None) -> None:
+        self.roles = dict(roles or {})
+
+    def grant(
+        self, project_id: str, member_id: str, role: ProjectRole = ProjectRole.MEMBER
+    ) -> None:
+        self.roles[(project_id, member_id)] = role
+
+    async def role(self, project_id: str, member_id: str) -> ProjectRole | None:
+        return self.roles.get((project_id, member_id))
+
+    async def project_ids(self, member_id: str) -> list[str]:
+        return [project for (project, member) in self.roles if member == member_id]
+
+
+class RecordingActivityLog(ActivityLog):
+    """Collects the events a service would have written."""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    async def record(
+        self,
+        *,
+        project_id: str,
+        member_id: str | None,
+        kind: str,
+        detail: dict[str, Any] | None = None,
+        ticket_id: str | None = None,
+    ) -> None:
+        self.events.append(
+            {
+                "project_id": project_id,
+                "member_id": member_id,
+                "kind": kind,
+                "detail": dict(detail or {}),
+                "ticket_id": ticket_id,
+            }
+        )

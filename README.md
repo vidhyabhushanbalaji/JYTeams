@@ -10,13 +10,16 @@ Postgres covers it.
 
 ## Status
 
-**Backend only.** The API boots, health probes work, and **all three sections are
+**Backend and desktop app.** The API boots, health probes work, and **all four sections are
 implemented**: upload a directory of markdown files and you get a described tree (one
 description per folder, produced bottom-up; documents are stored, never summarised); add a
 single document and the service scores every folder locally to suggest where it belongs, then
-places it in the folder you choose; search a project for the document that answers a
-question, matching locally against folder descriptions and document text; and double-click a
-document to read its markdown in the app and save an edit back. Details for each:
+places it in the folder you choose; search a project for the document that answers a question,
+matching locally against folder descriptions and document text; and double-click a document to
+read its markdown in the app and save an edit back. **Tickets** sit on top: sign in with a name
+(no password — this is a hackathon build), share a project with teammates, keep a personal
+to-do list of tasks, and press a ticket to see the project documents it is about — the search
+runs once and is cached on the ticket. Details for each:
 [`backend/README.md`](backend/README.md).
 
 | Section | Directory | HTTP prefix | State |
@@ -24,6 +27,10 @@ document to read its markdown in the app and save an edit back. Details for each
 | Graph Creation | `backend/app/graph_creation/` | `/api/graph-creation` | implemented |
 | Graph Add | `backend/app/graph_add/` | `/api/graph-add` | implemented |
 | Graph AI Search | `backend/app/graph_ai_search/` | `/api/graph-ai-search` | implemented |
+| Tickets | `backend/app/tickets/` | `/api/tickets` | implemented |
+
+The desktop app (`frontend/`) has a rail with **Projects**, **Tickets**, the API/DB status and
+**Settings**, plus the identity chip that switches user.
 
 ## Quickstart (backend)
 
@@ -34,9 +41,10 @@ document to read its markdown in the app and save an edit back. Details for each
 # 2. configuration
 Copy-Item backend\.env.example backend\.env   # then fill in Supabase / Gemini
 
-# 3. database schema — paste supabase\migrations\0001_graph_creation.sql and
-#    supabase\migrations\0002_graph_add.sql into the Supabase SQL editor (or
+# 3. database schema — paste supabase\migrations\0001_graph_creation.sql,
+#    0002_graph_add.sql and 0003_tickets.sql into the Supabase SQL editor (or
 #    `npx supabase db push`), then create a private `project-files` storage bucket.
+#    0003 makes `members` the identity (a name, no password) and adds tickets.
 
 # 4. run
 cd backend
@@ -55,8 +63,10 @@ More detail, including tests and credentials setup: [`backend/README.md`](backen
 .clinerules/          # agent rules — section ownership is enforced here
 .cline/skills/        # workspace agent skills (find-skills)
 backend/              # FastAPI service (app/, tests/, requirements*.txt, .env.example)
-supabase/migrations/   # SQL schema (projects, directories, files, creation_jobs, add_requests)
-frontend/             # Electron app — placeholder until the backend is done
+supabase/migrations/   # SQL schema (projects, directories, files, creation_jobs, add_requests,
+                       #             members, project_members, tickets, ticket_files,
+                       #             ticket_comments, ticket_events)
+frontend/             # Electron app (Projects + Tickets, React)
 ```
 
 ## Working together

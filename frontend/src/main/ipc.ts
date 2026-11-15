@@ -6,12 +6,38 @@
 import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import type { IpcMainInvokeEvent, OpenDialogOptions } from 'electron'
 
-import type { AppConfig, FileContentInput, PlacementInput, XYPosition } from '../shared/types'
+import type {
+  AppConfig,
+  FileContentInput,
+  PlacementInput,
+  TicketInput,
+  TicketPatch,
+  TicketStatus,
+  XYPosition
+} from '../shared/types'
 import { run } from './api/client'
 import { readFileContent, saveFileContent } from './api/files'
 import { ping } from './api/health'
 import { getDirectory, getJob, getProject, getTree, listProjects } from './api/projects'
 import { searchProject } from './api/search'
+import {
+  addComment,
+  attachFile,
+  createTicket,
+  currentMember,
+  detachFile,
+  getTicket,
+  listActivity,
+  listMembers,
+  listProjectMembers,
+  listTickets,
+  setStatus,
+  shareProject,
+  signIn,
+  ticketFiles,
+  unshareProject,
+  updateTicket
+} from './api/tickets'
 import { inspectFile, inspectFolder, placeFile, suggestPlacement, uploadFolder } from './api/uploads'
 import { readConfig, writeConfig } from './config'
 import { clearLayout, loadLayout, saveLayout } from './layout'
@@ -84,6 +110,55 @@ export function registerIpc(): void {
 
   ipcMain.handle('search:run', (_event, input: { projectId: string; query: string; limit?: number }) =>
     run(() => searchProject({ projectId: input.projectId, query: input.query, limit: input.limit ?? 8 }))
+  )
+
+  ipcMain.handle('tickets:members', () => run(listMembers))
+  ipcMain.handle('tickets:sign-in', (_event, displayName: string) => run(() => signIn(displayName)))
+  ipcMain.handle('tickets:me', () => run(currentMember))
+  ipcMain.handle(
+    'tickets:list',
+    (
+      _event,
+      input: { scope?: 'mine' | 'project'; projectId?: string; status?: TicketStatus | null; limit?: number }
+    ) => run(() => listTickets(input))
+  )
+  ipcMain.handle('tickets:create', (_event, input: TicketInput) => run(() => createTicket(input)))
+  ipcMain.handle('tickets:get', (_event, ticketId: string, refresh: boolean) =>
+    run(() => getTicket(ticketId, refresh))
+  )
+  ipcMain.handle('tickets:update', (_event, ticketId: string, patch: TicketPatch) =>
+    run(() => updateTicket(ticketId, patch))
+  )
+  ipcMain.handle('tickets:status', (_event, ticketId: string, status: TicketStatus) =>
+    run(() => setStatus(ticketId, status))
+  )
+  ipcMain.handle('tickets:files', (_event, ticketId: string, refresh: boolean) =>
+    run(() => ticketFiles(ticketId, refresh))
+  )
+  ipcMain.handle(
+    'tickets:attach',
+    (_event, ticketId: string, fileId: string, source?: 'upload' | 'existing') =>
+      run(() => attachFile(ticketId, fileId, source ?? 'existing'))
+  )
+  ipcMain.handle('tickets:detach', (_event, ticketId: string, fileId: string) =>
+    run(() => detachFile(ticketId, fileId))
+  )
+  ipcMain.handle('tickets:comment', (_event, ticketId: string, body: string) =>
+    run(() => addComment(ticketId, body))
+  )
+  ipcMain.handle(
+    'tickets:activity',
+    (_event, input: { projectId?: string; ticketId?: string; limit?: number }) =>
+      run(() => listActivity(input))
+  )
+  ipcMain.handle('tickets:project-members', (_event, projectId: string) =>
+    run(() => listProjectMembers(projectId))
+  )
+  ipcMain.handle('tickets:share', (_event, projectId: string, memberId: string) =>
+    run(() => shareProject(projectId, memberId))
+  )
+  ipcMain.handle('tickets:unshare', (_event, projectId: string, memberId: string) =>
+    run(() => unshareProject(projectId, memberId))
   )
 
   ipcMain.handle('shell:open-external', async (_event, url: string) => {

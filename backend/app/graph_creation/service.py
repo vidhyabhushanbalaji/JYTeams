@@ -24,6 +24,8 @@ from pathlib import PurePosixPath
 
 from fastapi import HTTPException, status
 
+from app.core.access import ProjectAccess
+from app.core.activity import DOCUMENT_SAVED, FILES_UPLOADED, NOOP, ActivityLog
 from app.core.config import Settings
 from app.core.text import clip_description
 from app.graph_creation.describe import Describer, trim_for_prompt
@@ -86,11 +88,17 @@ class GraphCreationService:
         store: ObjectStore,
         describer: Describer,
         settings: Settings,
+        access: ProjectAccess | None = None,
+        activity: ActivityLog = NOOP,
     ) -> None:
         self._repository = repository
         self._store = store
         self._describer = describer
         self._settings = settings
+        #: Wired by the router in the app. ``None`` keeps the pre-sharing owner check, which is
+        #: what the section's unit tests rely on; membership is covered by its own tests.
+        self._access = access
+        self._activity = activity
 
     # ------------------------------------------------------------------ submit
 
@@ -124,6 +132,10 @@ class GraphCreationService:
         else:
             project = await self._repository.create_project(
                 owner_id=owner_id, name=(name or "").strip() or "Untitled project"
+            )
+            # The creator is the project's first member, and its owner.
+            await self._repository.add_project_member(
+                project_id=project["id"], member_id=owner_id, role="owner", added_by=owner_id
             )
 
         job = await self._repository.create_job(
@@ -161,6 +173,7 @@ class GraphCreationService:
                     "finished_at": _now(),
                 },
             )
+            await self._record_upload(prepared, failed=len(failures) > 0)
         except Exception as exc:  # noqa: BLE001 - recorded on the job row
             logger.exception("Graph creation job %s failed", job_id)
             try:
@@ -170,6 +183,24 @@ class GraphCreationService:
                 )
             except Exception:  # noqa: BLE001 - nothing else we can do
                 logger.exception("Could not record failure for job %s", job_id)
+
+    async def _record_upload(self, prepared: PreparedUpload, *, failed: bool) -> None:
+        """Tell the activity feed an upload landed. Never raises: the job row is the truth."""
+        try:
+            await self._activity.record(
+                project_id=prepared.project["id"],
+                member_id=prepared.owner_id,
+                kind=FILES_UPLOADED,
+                detail={
+                    "mode": prepared.mode.value,
+                    "project_name": str(prepared.project.get("name") or ""),
+                    "files": prepared.tree.total_files,
+                    "directories": sum(len(level) for level in by_depth(prepared.tree).values()),
+                    "status": "partial" if failed else "ok",
+                },
+            )
+        except Exception:  # noqa: BLE001 - an audit row must not fail the job
+            logger.warning("Could not record the upload event for %s", prepared.project["id"])
 
     # ---------------------------------------------------------------- describe
 
@@ -498,10 +529,20 @@ class GraphCreationService:
     # ------------------------------------------------------------------- read
 
     async def list_projects(self, owner_id: str) -> list[Row]:
-        return await self._repository.list_projects(owner_id)
+        """Every project the caller can see: the ones they created and the ones shared with them.
+
+        ``owner_id`` is the caller's member id; ``role`` on each row says which of the two it is.
+        """
+        if self._access is None:
+            rows = await self._repository.list_projects(owner_id)
+        else:
+            rows = await self._repository.list_projects_by_ids(
+                await self._access.project_ids(owner_id)
+            )
+        return [self._with_role(row, owner_id) for row in rows]
 
     async def get_project(self, project_id: str, owner_id: str) -> Row:
-        return await self._require_project(project_id, owner_id)
+        return self._with_role(await self._require_project(project_id, owner_id), owner_id)
 
     async def get_job(self, job_id: str, owner_id: str) -> Row:
         job = await self._repository.get_job(job_id)
@@ -630,15 +671,44 @@ class GraphCreationService:
                 "storage_path": stored.path,
             },
         )
+        try:
+            await self._activity.record(
+                project_id=str(row["project_id"]),
+                member_id=owner_id,
+                kind=DOCUMENT_SAVED,
+                detail={
+                    "file_id": str(row["id"]),
+                    "file_name": str(row.get("name") or ""),
+                    "path": str(row.get("path") or ""),
+                },
+            )
+        except Exception:  # noqa: BLE001 - the save already happened
+            logger.warning("Could not record the save event for %s", row["id"])
         return {**self._file_out(updated), "content_sha256": digest}
 
     # ----------------------------------------------------------------- helpers
 
     async def _require_project(self, project_id: str, owner_id: str) -> Row:
+        """One project, with the caller's access checked (404 for either miss).
+
+        ``owner_id`` is the caller's member id. With an access guard the check is project
+        membership, so a shared project is reachable; without one it is the original owner
+        comparison, which is what the section's unit tests set up.
+        """
         project = await self._repository.get_project(project_id)
-        if project is None or project.get("owner_id") != owner_id:
+        if project is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+        if self._access is not None:
+            await self._access.require(project_id, owner_id)
+        elif project.get("owner_id") != owner_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
         return project
+
+    @staticmethod
+    def _with_role(project: Row, member_id: str) -> Row:
+        """Add the caller's role, which the API returns so the UI can badge a shared project."""
+        role = "owner" if project.get("owner_id") == member_id else "member"
+        return {**project, "role": role}
 
     async def _require_file(self, file_id: str, owner_id: str) -> Row:
         """One file row, with its project's ownership checked (404 for either miss)."""

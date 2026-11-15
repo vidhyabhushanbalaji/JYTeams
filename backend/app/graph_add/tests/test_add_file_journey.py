@@ -93,9 +93,9 @@ async def test_the_whole_journey_keeps_the_tree_described_in_one_call() -> None:
 
     directories = {row["path"]: row for row in await repository.list_directories(project["id"])}
     assert directories["operations/runbooks"]["direct_file_count"] == 1
-    assert "alert-runbook.md" in directories["operations/runbooks"]["description"]
-    assert "alert-runbook.md" in directories["operations"]["description"]
-    assert "alert-runbook.md" in directories[""]["description"]
+    assert "alert runbook" in directories["operations/runbooks"]["description"]
+    assert "alert runbook" in directories["operations"]["description"]
+    assert "alert runbook" in directories[""]["description"]
 
     files = await repository.list_files(project["id"])
     placed = next(row for row in files if row["path"].endswith("alert-runbook.md"))

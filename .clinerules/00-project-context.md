@@ -1,17 +1,16 @@
 # JYTeams — Project Context
 
 An Electron desktop app that makes Microsoft Teams project information easier to reach.
-**Current focus: the backend only.** Electron is wired up after the backend is done.
 
 ## Stack
 
 | Layer | Choice |
 | --- | --- |
-| Frontend (later) | Electron + Node 24 — `frontend/` is a placeholder today |
+| Frontend | Electron + Node 24 — `frontend/src` (React); Projects, graph, tickets, settings |
 | Backend | Python 3.14 + FastAPI — `backend/` |
-| Auth | Supabase Auth (bearer token); `AUTH_MODE=dev` trusts `X-Dev-User-Id` locally |
-| Data | Supabase **Postgres** (the tree, via `ltree`) + Supabase **Storage** (markdown files) |
-| LLM | Gemini `gemini-3.1-flash-lite` (`google-genai`) — **directory descriptions only** (creation, and the refresh after a placement). It is the **only** provider (Groq was retired); `GEMINI_FALLBACK_MODELS` is empty, so every description comes from that model. `SUMMARIZER=mock` gives the offline describer. Search and placement ranking are local (`app/core/text.py`) and make no model call |
+| Auth | **A name, no password.** `members` is the identity table; `AUTH_MODE=dev` trusts `X-Dev-User-Id` (a `members.id`) and the app's startup screen signs in by picking or typing a name |
+| Data | Supabase **Postgres** (tree via `ltree`, plus `members`, `project_members`, `tickets`, `ticket_files`, `ticket_comments`, `ticket_events`) + Supabase **Storage** (markdown files) |
+| LLM | Gemini `gemini-3.1-flash-lite` (`google-genai`) — **directory descriptions** (creation, and the refresh after a placement) **and one ticket search-terms distillation** (a ticket's wording → the few words a search should use). It is the **only** provider (Groq was retired); `GEMINI_FALLBACK_MODELS` is empty, so every description comes from that model. `SUMMARIZER=mock` gives the offline describer (and the offline distiller). Search and placement ranking are local (`app/core/text.py`) and make no model call |
 | Graph DB | **None.** Neo4j was retired; Graph AI Search walks the `ltree` hierarchy instead |
 
 ## Layout
@@ -20,12 +19,13 @@ An Electron desktop app that makes Microsoft Teams project information easier to
 backend/
 ├─ app/
 │  ├─ main.py              # app factory, lifespan, CORS, mounts the section routers
-│  ├─ core/                # config (pydantic-settings), logging, auth dependency, text.py
+│  ├─ core/                # config, logging, auth dependency, text.py, access.py, activity.py
 │  ├─ db/                  # Supabase client factories + health ping
 │  ├─ health/              # /health, /health/supabase
 │  ├─ graph_creation/      # SECTION — implemented (upload a directory → described tree)
 │  ├─ graph_add/           # SECTION — implemented (place one document in that tree)
-│  └─ graph_ai_search/     # SECTION — implemented (local search: descriptions + document text)
+│  ├─ graph_ai_search/     # SECTION — implemented (local search: descriptions + document text)
+│  └─ tickets/             # SECTION — implemented (members, sharing, tickets, cached files, feed)
 ├─ tests/                  # cross-cutting tests (health, config, wiring)
 ├─ requirements.txt        # runtime deps (pinned)
 ├─ requirements-dev.txt    # -r requirements.txt + pytest / ruff / httpx2
@@ -35,7 +35,8 @@ supabase/
 └─ migrations/             # SQL schema, applied with the Supabase CLI or SQL editor
 ```
 
-Sections are mounted at `/api/graph-creation`, `/api/graph-add`, `/api/graph-ai-search`.
+Sections are mounted at `/api/graph-creation`, `/api/graph-add`, `/api/graph-ai-search`,
+`/api/tickets`.
 
 ## Graph Creation, in one paragraph
 
@@ -79,6 +80,26 @@ because every score comes from the same function; unreadable documents mark the 
 lexical (stems, names, phrase bonuses), so a query phrased in words the documentation never
 uses can still miss.
 
+## Tickets, in one paragraph
+
+Identity is a name: `POST /api/tickets/members` finds or creates a `members` row and the app
+stores that id, so there is no password and no per-person auth user. A project is shared through
+`project_members` — `app/core/access.py` is the only place membership is decided, and every
+section asks it instead of comparing `owner_id`, which now means "creator". Tickets belong to one
+project, are assigned to one member, and carry a status, priority, due date, labels and comments;
+the box that marks one complete also stamps who did it. A search is a bad query away from finding
+nothing — a ticket is mostly words no document contains — so opening one first distils its title
+and description into a short search query (`app/tickets/distill.py`, one model call, `SUMMARIZER=mock`
+gives the offline one), then runs Graph AI Search once with five hits and stores both on the ticket
+row with two fingerprints: the terms (title + description + `DISTILLER_VERSION`) and the result
+(distilled query + context + project's file count and newest `files.updated_at` + limit + folder
+threshold + matcher version). A second open is a database read, a project change re-runs only the
+model-free search, and `?refresh=true` re-runs the search without asking the model again. Documents
+can be attached to a ticket (an existing one, or one placed with the ticket as extra placement
+context) without completing it. Every action writes a `ticket_events` row through
+`app/core/activity.py`, including project-level changes that came from another section, and the
+app's tickets page shows that feed.
+
 ## Commands
 
 All backend commands run from `backend/`, using the repo-root virtualenv:
@@ -113,6 +134,14 @@ API docs: <http://localhost:8000/docs> · health: <http://localhost:8000/health>
   `LLM_MIN_INTERVAL_SECONDS` (2 s) apart — retries and fallback models included.
 - Schema changes are SQL in `supabase/migrations/`, reviewed by both of us before they
   are applied to a shared project.
+- **Descriptions are prose.** Both prompts ask for natural language without hyphens, underscores
+  or run-together identifiers, and `clip_description` naturalises every stored description
+  (`naturalise_description`; text in backticks and URLs is preserved). Matching is
+  separator-blind: `app/core/text.py` splits `-`, `_`, dashes and camelCase, and also indexes a
+  compound's glued form — so a query for `rollback plan` finds `rollback-plan.md`, and the phrase
+  bonus sees through the separator. `ScoreConfig.version` is `local-2`; bump it when ranking
+  changes. Old descriptions can be rewritten in place with
+  `app.graph_creation.tools.normalise_descriptions` (no model call).
 - **Gemini is the only model provider** (`gemini-3.1-flash-lite`), and anything that can reach
   the model for real is capped at **5 requests per AI-run task** — read
   `.clinerules/20-ai-usage-limits.md` before running a live check. Users of the app are not
@@ -126,4 +155,19 @@ API docs: <http://localhost:8000/docs> · health: <http://localhost:8000/health>
   `backend/README.md` ("Graph AI Search endpoints") before changing its routes or `search.py`,
   and keep it read-only and model-free: it must never write to a project and never call a
   model.
+- **Tickets are designed and built** — read `backend/README.md` ("Tickets endpoints") before
+  changing its routes, tables or the cache. The section makes exactly **one** kind of model call:
+  `distill.py`, which reduces a ticket's wording to its search terms, is cached on the ticket row
+  and is never allowed to block a ticket from opening (no key, `SUMMARIZER=mock` and any model
+  failure fall back to `cache.search_query`). A ticket's files are still a cached, model-free
+  Graph AI Search; `cache.py`'s two fingerprints (terms: title + description + `DISTILLER_VERSION`;
+  results: distilled query + context + file count + newest `files.updated_at` + limit + threshold +
+  matcher version) are what make each cache safe to reuse. Bump `MATCHING_VERSION` with
+  `ScoreConfig.version` when ranking changes, and `DISTILLER_VERSION` when the prompt or the
+  distiller changes.
+- **Membership is decided in `app/core/access.py`.** Sections ask `ProjectAccess` for the
+  caller's role; `projects.owner_id` is only the creator. Do not reintroduce `owner_id`
+  comparisons for access, and do not give another section its own sharing rules.
+- **Never import another section's internals.** Use its `public.py` (Graph AI Search, Graph Add)
+  or its HTTP API; shared writes such as the activity feed live in `app/core/`.
 

@@ -11,42 +11,19 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 
+from app.core.access import SupabaseProjectAccess
 from app.core.auth import CurrentUser, get_current_user
-from app.core.config import Settings, get_settings
-from app.graph_ai_search.repository import SupabaseSearchRepository
+from app.core.config import get_settings
+from app.graph_ai_search.public import build_service
 from app.graph_ai_search.schemas import SearchResults
-from app.graph_ai_search.scoring import LocalScorer
 from app.graph_ai_search.service import GraphSearchService
-from app.graph_ai_search.storage import DocumentTextReader, build_reader
 
 router = APIRouter(tags=["Graph AI Search"])
 
-#: The scorer is stateless, so one instance serves every request.
-_SCORER = LocalScorer()
-#: The reader owns the digest cache — it must outlive a request to be worth having.
-_READER: DocumentTextReader | None = None
-
-
-def _reader_for(settings: Settings) -> DocumentTextReader:
-    """Create the document reader once per process (its cache is the point)."""
-    global _READER
-    if _READER is None:
-        _READER = build_reader(
-            cache_entries=settings.blob_cache_entries,
-            max_chars=settings.search_max_document_chars,
-        )
-    return _READER
-
 
 def get_service() -> GraphSearchService:
-    """Wire the service for a request (Supabase repository, document reader, local scorer)."""
-    settings = get_settings()
-    return GraphSearchService(
-        repository=SupabaseSearchRepository(),
-        reader=_reader_for(settings),
-        scorer=_SCORER,
-        settings=settings,
-    )
+    """Wire the service for a request (Supabase repository, shared reader, local scorer)."""
+    return build_service(get_settings(), access=SupabaseProjectAccess())
 
 
 ServiceDep = Annotated[GraphSearchService, Depends(get_service)]

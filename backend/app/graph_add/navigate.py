@@ -22,6 +22,10 @@ from app.core.text import Query, ScoreConfig, score_folder_texts, terms
 
 #: Folders offered to the caller (the project root may add one more).
 MAX_CANDIDATES = 3
+#: How much a surrounding context (a ticket, say) counts next to the document itself. Context is
+#: scored on the same folders and can carry a folder the document does not name, but only at this
+#: fraction of its strength — so a confident document match is never overruled.
+CONTEXT_WEIGHT = 0.5
 #: The floor for being offered at all. It is deliberately low — unlike Graph AI Search, which
 #: prunes a walk and must be frugal, placement ranks the whole tree and then shows the best few,
 #: so the floor only has to exclude folders that share nothing with the document.
@@ -103,8 +107,14 @@ def score_folders(
     threshold: float = DEFAULT_FOLDER_THRESHOLD,
     max_candidates: int = MAX_CANDIDATES,
     config: ScoreConfig | None = None,
+    context: Query | None = None,
 ) -> Scan:
-    """Score every folder against the document and return the best few, plus the root."""
+    """Score every folder against the document and return the best few, plus the root.
+
+    ``context`` (a ticket's own words, for example) is scored separately and can carry a folder
+    the document does not name — at :data:`CONTEXT_WEIGHT` of its strength, so the document
+    remains the stronger signal.
+    """
     config = config or ScoreConfig()
     scan = Scan(threshold=threshold, scorer_version=config.version)
     ranked: list[RankedLocation] = []
@@ -118,10 +128,20 @@ def score_folders(
             contains=folder.contains,
             config=config,
         )
-        if score < threshold:
-            continue
         haystack = terms(f"{folder.name} {folder.description} {' '.join(folder.contains)}")
         matched = query.matched(haystack)
+        if context is not None:
+            context_score = score_folder_texts(
+                context,
+                name=folder.name,
+                description=folder.description,
+                contains=folder.contains,
+                config=config,
+            )
+            score = round(max(score, CONTEXT_WEIGHT * context_score), 4)
+            matched = tuple(sorted({*matched, *context.matched(haystack)}))
+        if score < threshold:
+            continue
         ranked.append(
             RankedLocation(
                 node=folder,
