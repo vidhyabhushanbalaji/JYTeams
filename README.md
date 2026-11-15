@@ -4,17 +4,18 @@ An Electron desktop app that makes Microsoft Teams **project information easier 
 reach**. By Charlie and Bhushan.
 
 Stack: Electron (frontend, later) · Python 3.14 + FastAPI (backend) · Supabase (auth,
-Postgres tree, file storage) · Gemini (summaries). Neo4j was retired — the project tree is
-a hierarchy, and `ltree` in Postgres covers it.
+Postgres tree, file storage) · Groq or Gemini (folder descriptions only). Neo4j was retired —
+the project tree is a hierarchy, and `ltree` in Postgres covers it.
 
 ## Status
 
 **Backend only.** The API boots, health probes work, and **all three sections are
-implemented**: upload a directory of markdown files and you get a described tree (per-file
-summaries, per-directory descriptions produced bottom-up); add a single document and the
-service walks that tree to suggest where it belongs, then places it in the folder you choose;
-and search a project for the document that answers a question, ranking hits from the same
-stored summaries. Details for each: [`backend/README.md`](backend/README.md).
+implemented**: upload a directory of markdown files and you get a described tree (one
+description per folder, produced bottom-up; documents are stored, never summarised); add a
+single document and the service scores every folder locally to suggest where it belongs, then
+places it in the folder you choose; and search a project for the document that answers a
+question, matching locally against folder descriptions and document text. Details for each:
+[`backend/README.md`](backend/README.md).
 
 | Section | Directory | HTTP prefix | State |
 | --- | --- | --- | --- |
@@ -29,7 +30,7 @@ stored summaries. Details for each: [`backend/README.md`](backend/README.md).
 .\.venv\Scripts\python.exe -m pip install -r backend\requirements-dev.txt
 
 # 2. configuration
-Copy-Item backend\.env.example backend\.env   # then fill in Supabase / Gemini
+Copy-Item backend\.env.example backend\.env   # then fill in Supabase / Groq
 
 # 3. database schema — paste supabase\migrations\0001_graph_creation.sql and
 #    supabase\migrations\0002_graph_add.sql into the Supabase SQL editor (or

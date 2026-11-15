@@ -132,6 +132,7 @@ export function HomeScreen({
           notify('Project created.')
           onOpenProject(projectId)
         }}
+        onWarning={(message) => notify(message, 'error')}
       />
     </div>
   )

@@ -33,10 +33,12 @@ export function Inspector({ node }: { node: FocusNodeModel | null }) {
         <h3 className="side__title">{node.label}</h3>
       </div>
 
-      <div className="side__section">
-        <span className="side__label">{node.kind === 'file' ? 'Summary' : 'Description'}</span>
-        <p className="side__text">{node.description ?? 'Nothing written for this yet.'}</p>
-      </div>
+      {node.kind === 'file' ? null : (
+        <div className="side__section">
+          <span className="side__label">Description</span>
+          <p className="side__text">{node.description ?? 'Nothing written for this yet.'}</p>
+        </div>
+      )}
 
       <div className="kv">
         <div className="kv__row">
@@ -45,16 +47,10 @@ export function Inspector({ node }: { node: FocusNodeModel | null }) {
         </div>
 
         {node.kind === 'file' ? (
-          <>
-            <div className="kv__row">
-              <span className="kv__key">Size</span>
-              <span className="kv__value">{humanBytes(node.sizeBytes ?? 0)}</span>
-            </div>
-            <div className="kv__row">
-              <span className="kv__key">Summary</span>
-              <span className="kv__value">{node.status ?? 'pending'}</span>
-            </div>
-          </>
+          <div className="kv__row">
+            <span className="kv__key">Size</span>
+            <span className="kv__value">{humanBytes(node.sizeBytes ?? 0)}</span>
+          </div>
         ) : (
           <>
             <div className="kv__row">

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -23,6 +24,7 @@ from datetime import UTC, datetime
 from fastapi import HTTPException, status
 
 from app.core.config import Settings
+from app.core.text import clip_description
 from app.graph_creation.describe import Describer, trim_for_prompt
 from app.graph_creation.extract import extract_text
 from app.graph_creation.repository import GraphRepository, Row
@@ -40,7 +42,7 @@ from app.graph_creation.tree import (
 
 logger = logging.getLogger(__name__)
 
-_PROGRESS_EVERY = 10
+_PROGRESS_MIN_INTERVAL = 1.0
 _STORAGE_CONCURRENCY = 4
 _BACKGROUND_TASKS: set[asyncio.Task] = set()
 
@@ -139,18 +141,18 @@ class GraphCreationService:
         job_id = prepared.job["id"]
         try:
             await self._repository.update_job(job_id, {"status": "summarising"})
-            descriptions, failed, first_failure = await self._describe_tree(prepared)
-            error = _failure_message(failed, first_failure)
+            descriptions, models, failures = await self._describe_tree(prepared)
+            error = _failure_message(len(failures), failures[0] if failures else None)
 
             await self._repository.update_job(job_id, {"status": "persisting"})
-            await self._persist(prepared, descriptions)
+            await self._persist(prepared, descriptions, models)
 
             await self._repository.update_job(
                 job_id,
                 {
-                    "status": "partial" if failed else "ok",
+                    "status": "partial" if failures else "ok",
                     "processed_files": prepared.tree.total_files,
-                    "failed_files": failed,
+                    "failed_files": len(failures),
                     "error": error,
                     "finished_at": _now(),
                 },
@@ -169,46 +171,84 @@ class GraphCreationService:
 
     async def _describe_tree(
         self, prepared: PreparedUpload
-    ) -> tuple[dict[str, str], int, str | None]:
-        """Describe every directory bottom-up: one model call each, no per-file summaries."""
+    ) -> tuple[dict[str, str], dict[str, str], list[str]]:
+        """Describe every directory bottom-up, one level at a time.
+
+        A folder is only described once its children are, because its prompt carries their
+        descriptions. Folders on the same level are independent, so they run concurrently up to
+        ``SUMMARY_CONCURRENCY``: the tree is still produced bottom-up, but a project no longer
+        pays a full model round-trip per folder in series.
+
+        A folder that fails stores no description (``None``) and is reported on the job; it does
+        not stop its siblings, and its parent is still described.
+        """
         tree = prepared.tree
         job_id = prepared.job["id"]
         texts = self._file_texts(tree)
         descriptions: dict[str, str] = {}
-        failed = 0
-        first_failure: str | None = None
+        models: dict[str, str] = {}
+        failures: list[str] = []
+        concurrency = max(1, int(self._settings.summary_concurrency))
+        semaphore = asyncio.Semaphore(concurrency)
+        lock = asyncio.Lock()
         processed = 0
-        reported = 0
+        reported_at = 0.0
 
-        for node in postorder(tree):
-            file_pairs = trim_for_prompt(
-                [(entry.name, texts[entry.path]) for entry in node.files],
-                per_file=self._settings.description_file_head_chars,
-                total=self._settings.description_max_input_chars,
+        async def report_progress() -> None:
+            nonlocal reported_at
+            now = time.monotonic()
+            if now - reported_at < _PROGRESS_MIN_INTERVAL:
+                return
+            reported_at = now
+            await self._repository.update_job(
+                job_id, {"processed_files": min(processed, tree.total_files)}
             )
-            directory_pairs = [
-                (child.name, descriptions.get(child.path) or "no description")
-                for child in node.directories
-            ]
-            try:
-                descriptions[node.path] = await self._describer.describe_directory(
-                    path=node.path, files=file_pairs, directories=directory_pairs
-                )
-            except Exception as exc:  # noqa: BLE001 - one bad node must not sink the job
-                logger.warning("Could not describe %r: %s", node.path or "<root>", exc)
-                descriptions[node.path] = "Description unavailable."
-                failed += 1
-                first_failure = first_failure or f"{type(exc).__name__}: {exc}"
 
-            # Progress is reported in files: a directory counts once its own files are covered.
-            processed += node.direct_file_count
-            if processed - reported >= _PROGRESS_EVERY or processed >= tree.total_files:
-                reported = processed
-                await self._repository.update_job(
-                    job_id, {"processed_files": min(processed, tree.total_files)}
+        async def describe(node: DirectoryNode) -> None:
+            nonlocal processed
+            async with semaphore:
+                file_pairs = trim_for_prompt(
+                    [(entry.name, texts[entry.path]) for entry in node.files],
+                    per_file=self._settings.description_file_head_chars,
+                    total=self._settings.description_max_input_chars,
                 )
+                directory_pairs = [
+                    (child.name, descriptions.get(child.path) or "no description")
+                    for child in node.directories
+                ]
+                started = time.monotonic()
+                try:
+                    result = await self._describer.describe_directory(
+                        path=node.path, files=file_pairs, directories=directory_pairs
+                    )
+                except Exception as exc:  # noqa: BLE001 - one folder must not sink the job
+                    logger.warning("Could not describe %r: %s", node.path or "<root>", exc)
+                    failures.append(
+                        f"{node.path or '<root>'}: {type(exc).__name__}: {str(exc)[:300]}"
+                    )
+                else:
+                    descriptions[node.path] = clip_description(
+                        result.text, self._settings.description_max_chars
+                    )
+                    if result.model:
+                        models[node.path] = result.model
+                    logger.info(
+                        "Described %r with %s in %.0f ms",
+                        node.path or "<root>",
+                        result.model or "?",
+                        (time.monotonic() - started) * 1000,
+                    )
+                async with lock:
+                    processed += node.direct_file_count
+                    await report_progress()
 
-        return descriptions, failed, first_failure
+        for level in reversed(list(by_depth(tree))):
+            await asyncio.gather(*(describe(node) for node in level))
+
+        # Always leave the job at its final count, even if the last update was throttled.
+        reported_at = 0.0
+        await report_progress()
+        return descriptions, models, failures
 
     def _file_texts(self, tree: DirectoryNode) -> dict[str, str]:
         """Decode every uploaded file once, capped for prompt use."""
@@ -255,12 +295,13 @@ class GraphCreationService:
         self,
         prepared: PreparedUpload,
         descriptions: dict[str, str],
+        models: dict[str, str],
     ) -> None:
         stored = await self._store_objects(prepared)
         if prepared.mode is UploadMode.ADD:
-            await self._persist_add(prepared, descriptions, stored)
+            await self._persist_add(prepared, descriptions, models, stored)
         else:
-            await self._persist_new(prepared, descriptions, stored)
+            await self._persist_new(prepared, descriptions, models, stored)
 
     async def _store_objects(self, prepared: PreparedUpload) -> dict[str, StoredObject]:
         project_id = prepared.project["id"]
@@ -283,6 +324,7 @@ class GraphCreationService:
         self,
         prepared: PreparedUpload,
         descriptions: dict[str, str],
+        models: dict[str, str],
         stored: dict[str, StoredObject],
     ) -> None:
         project_id = prepared.project["id"]
@@ -295,6 +337,7 @@ class GraphCreationService:
                     node,
                     None if node.parent is None else path_to_id[node.parent.path],
                     descriptions,
+                    models,
                 )
                 for node in level
             ]
@@ -314,6 +357,7 @@ class GraphCreationService:
         self,
         prepared: PreparedUpload,
         descriptions: dict[str, str],
+        models: dict[str, str],
         stored: dict[str, StoredObject],
     ) -> None:
         """Merge the uploaded tree into an existing project, then refresh ancestors."""
@@ -333,7 +377,7 @@ class GraphCreationService:
                     merged.add(node.path)
                     continue
                 parent_id = path_to_id[node.parent.path]
-                rows.append(self._directory_row(project_id, node, parent_id, descriptions))
+                rows.append(self._directory_row(project_id, node, parent_id, descriptions, models))
             if rows:
                 for row in await self._repository.insert_directories(rows):
                     path_to_id[row["path"]] = row["id"]
@@ -422,13 +466,14 @@ class GraphCreationService:
                 for d in child_dirs.get(row["id"], [])
             ]
             try:
-                text = await self._describer.describe_directory(
+                result = await self._describer.describe_directory(
                     path=path, files=file_pairs, directories=directory_pairs
                 )
             except Exception as exc:  # noqa: BLE001 - keep the rest of the refresh
                 logger.warning("Could not refresh description for %r: %s", path or "<root>", exc)
                 continue
 
+            text = clip_description(result.text, self._settings.description_max_chars)
             counts = {
                 "direct_file_count": len(file_pairs),
                 "child_directory_count": len(directory_pairs),
@@ -437,7 +482,7 @@ class GraphCreationService:
                 row["id"],
                 {
                     "description": text,
-                    "description_model": self._describer.model_name,
+                    "description_model": result.model,
                     **counts,
                 },
             )
@@ -523,6 +568,7 @@ class GraphCreationService:
         node: DirectoryNode,
         parent_id: str | None,
         descriptions: dict[str, str],
+        models: dict[str, str],
     ) -> Row:
         description = descriptions.get(node.path)
         return {
@@ -533,7 +579,7 @@ class GraphCreationService:
             "ltree_path": node.ltree_path or None,
             "depth": node.depth,
             "description": description,
-            "description_model": self._describer.model_name if description else None,
+            "description_model": models.get(node.path) if description else None,
             "direct_file_count": node.direct_file_count,
             "child_directory_count": node.child_directory_count,
         }

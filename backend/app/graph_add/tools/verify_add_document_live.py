@@ -2,7 +2,7 @@
 # ruff: noqa: E402 - the executable path bootstrap below must run before the ``app`` imports.
 """Live check: add one document to a real project, through the real routes.
 
-Run from ``backend/`` (needs a configured ``.env`` — Supabase + Gemini):
+Run from ``backend/`` (needs a configured ``.env`` — Supabase + a model key):
 
     ../.venv/bin/python -m app.graph_add.tools.verify_add_document_live \
         --project-id <uuid> --user <owner-uuid> --document path/to/doc.md
@@ -14,7 +14,7 @@ Run from ``backend/`` (needs a configured ``.env`` — Supabase + Gemini):
     ... --directory guides
 
 The app is started in-process, so the calls go through the real routers and the real
-collaborators: the Supabase repository, Supabase Storage and Gemini. Unlike
+collaborators: the Supabase repository, Supabase Storage and the configured describer. Unlike
 ``verify_add_document`` (in-memory, no network) this **writes to a real project** — one
 ``files`` row, one Storage object (content-addressed, so a duplicate document adds none),
 and re-described folders up to the root: every ancestor description and the project
@@ -142,11 +142,19 @@ def print_suggestions(payload: Row) -> None:
 
 def run(args: argparse.Namespace, document: Path, report: Report, payloads: dict[str, Any]) -> int:
     settings = get_settings()
+    provider = settings.resolved_summarizer
+    model = (
+        settings.groq_model
+        if provider == "groq"
+        else settings.gemini_model
+        if provider == "gemini"
+        else "offline mock"
+    )
 
     print(f"Graph Add — live check against project {args.project_id}")
     print(f"  api          : in-process ({settings.supabase_url or 'SUPABASE_URL missing'})")
     print(f"  storage      : bucket {settings.storage_bucket}")
-    print(f"  describer    : {settings.resolved_summarizer} ({settings.gemini_model})")
+    print(f"  describer    : {provider} ({model})")
     print(f"  identity     : {'bearer token' if args.token else 'X-Dev-User-Id ' + args.user}")
     print(f"  document     : {document}")
 

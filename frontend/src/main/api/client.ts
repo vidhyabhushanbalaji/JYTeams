@@ -10,7 +10,11 @@ import type { ApiError, ApiResult } from '../../shared/types'
 import { readConfig } from '../config'
 
 export const DEFAULT_TIMEOUT_MS = 120_000
-/** Model walks (search, add suggestions) legitimately take minutes on a large project. */
+/**
+ * Creation describes one folder per model call and a placement refreshes its descriptions in one
+ * call, so those are the requests that can legitimately take minutes. The suggestion scan and
+ * every search are local.
+ */
 export const LONG_TIMEOUT_MS = 600_000
 
 export class HttpError extends Error {

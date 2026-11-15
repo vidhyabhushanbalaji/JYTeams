@@ -1,7 +1,7 @@
 # JYTeams backend
 
 FastAPI service for the JYTeams desktop app. Python 3.14, **Supabase** for auth, Postgres
-(the project tree) and file storage, **Gemini** for folder descriptions.
+(the project tree) and file storage, and **Groq or Gemini** for folder descriptions.
 
 ## Setup
 
@@ -10,7 +10,7 @@ Dependencies live in the repo-root virtualenv (`../.venv`, already created with 
 
 ```powershell
 ..\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-Copy-Item .env.example .env    # then fill in the Supabase / Gemini values
+Copy-Item .env.example .env    # then fill in the Supabase / Groq values
 ```
 
 Then prepare Supabase:
@@ -155,8 +155,9 @@ content-addressed — only an identical `(project_id, path)` is a conflict.
 The uploaded bytes and the suggestions are held on an `add_requests` row between the two
 steps, so placement never re-uploads the document, and blobs stay content-addressed so
 identical documents share one object. Documents are not summarised at all; only the folders
-around them are described. Without a `GEMINI_API_KEY` a deterministic mock describer is used
-(it names the files and subfolders it sees), which is also what the tests exercise.
+around them are described. Without a model key (or with `SUMMARIZER=mock`) a deterministic
+mock describer is used (it names the files and subfolders it sees), which is also what the tests
+exercise.
 
 ## Graph AI Search endpoints
 
@@ -240,7 +241,7 @@ documentation never uses will still miss.
 # offline: the PulseAPI example tree, seeded document text, local scorer (no model call)
 ..\.venv\Scripts\python.exe -m app.graph_ai_search.tools.verify_search
 
-# live, read-only, against a real project (needs SUPABASE_* and GEMINI_API_KEY)
+# live, read-only, against a real project (needs SUPABASE_* and a model key)
 ..\.venv\Scripts\python.exe -m app.graph_ai_search.tools.verify_search_live `
   --project-id <uuid> --user <owner-uuid> [--only rollback] [--limit 5]
 ```
@@ -289,7 +290,7 @@ placement modes, conflicts and renames, single use, expiry and ownership — pri
 `ok`/`FAIL` line per assertion, then exiting non-zero if anything failed.
 
 ```powershell
-# from backend/ — no Supabase, no Gemini, no .env needed
+# from backend/ — no Supabase, no model key, no .env needed
 ..\.venv\Scripts\python.exe -m app.graph_add.tools.verify_add_document
 ..\.venv\Scripts\python.exe -m app.graph_add.tools.verify_add_document --json
 ```
@@ -301,8 +302,8 @@ placement modes, conflicts and renames, single use, expiry and ownership — pri
 ### Check against a real project
 
 `app/graph_add/tools/verify_add_document_live.py` does the same journey against a real
-project: it starts the app in-process (real Supabase repository, Storage and Gemini) and
-drives both routes, asserting the transcript before and after.
+project: it starts the app in-process (real Supabase repository, Storage and the configured
+describer) and drives both routes, asserting the transcript before and after.
 
 ```powershell
 # suggestions only: nothing is written
@@ -321,9 +322,12 @@ folder, its ancestors and the project. `--directory <path|id>` overrides the sug
 resolves a clash, and `--json` dumps every payload. Exit codes: `0` placed, `1` a check
 failed, `2` the name is taken.
 
-> If Gemini answers `429 RESOURCE_EXHAUSTED`, the free-tier daily quota for that model is
-> spent. `GEMINI_MODEL=gemini-3.5-flash-lite` (a process-only override) usually still has
-> quota; `description_model` on each folder row names the model that produced its text.
+> If a provider answers `429`, that model's quota is spent or it is briefly throttled. The
+> client waits for `retry-after` when Groq sends one and then moves to the configured fallback
+> model. `description_model` on each folder row names the model that actually produced its text.
+> For Gemini specifically, `GEMINI_MODEL=gemini-3.5-flash-lite` (a process-only override) has the
+> most free quota; the `GEMINI_FALLBACK_MODELS` default starts with the lite models for the same
+> reason.
 
 ## Try it locally (upload a directory or a .zip)
 
@@ -352,9 +356,10 @@ Options: `--url`, `--mode new|add`, `--name`, `--project-id`, `--token` (Supabas
 bearer token; otherwise the `X-Dev-User-Id` header is sent), `--depth`, `--timeout`,
 `--interval`, `--json`, `--full`.
 
-`--dry-run` uses the offline mock describer; a live run uses Gemini when
-`GEMINI_API_KEY` is set. Either way the tree structure - empty-directory pruning,
-natural ordering, `ltree` paths - is identical to what the API stores.
+`--dry-run` uses the offline mock describer; a live run uses whichever describer
+`SUMMARIZER` resolves to (Groq when `GROQ_API_KEY` is set, otherwise Gemini, otherwise mock).
+Either way the tree structure - empty-directory pruning, natural ordering, `ltree` paths - is
+identical to what the API stores.
 
 ## How the tree is built
 
@@ -363,21 +368,29 @@ natural ordering, `ltree` paths - is identical to what the API stores.
 2. **Tree** (`tree.py`) — builds the hierarchy, **drops empty directories**, sorts
    children case-insensitively and number-aware (`file2` before `file10`), and projects
    each path onto a sanitised `ltree` label (suffixes keep siblings unique).
-3. **Describe** (`describe.py`, `service.py`) — post-order over the directories only. Each
-   prompt carries the **text** of the files directly inside the folder (each cut to
-   `DESCRIPTION_FILE_HEAD_CHARS`, the folder total capped by `DESCRIPTION_MAX_INPUT_CHARS`)
-   plus the descriptions of its child directories, so the root describes the whole project.
-   **Files are not summarised at all** — one model call per directory — and the prompt asks
-   for the words a reader would search for, because a local search matches this text to find
-   the folder. `SUMMARIZER=auto` uses Gemini when `GEMINI_API_KEY` is set, otherwise a
-   deterministic offline mock — the pipeline runs (and tests pass) with no key and no network.
+3. **Describe** (`describe.py`, `service.py`) — deepest level first, root last: a parent's
+   prompt carries its children's finished descriptions, so the root describes the whole project.
+   Each prompt also carries the **text** of the files directly inside the folder (each cut to
+   `DESCRIPTION_FILE_HEAD_CHARS`, the folder total capped by `DESCRIPTION_MAX_INPUT_CHARS`).
+   **Files are not summarised at all** — one model call per directory — and the prompt asks for
+   the words a reader would search for, because a local search matches this text to find the
+   folder. Folders on the same level have no dependency on each other and run concurrently up to
+   `SUMMARY_CONCURRENCY`; progress is reported per folder, so the job moves steadily instead of
+   jumping in tens of files. Every description is capped at `DESCRIPTION_MAX_CHARS` (300): the
+   prompt asks for that length and the reply is clipped to it, at a word boundary. Model calls
+   start at least `LLM_MIN_INTERVAL_SECONDS` (2 s) apart, including retries and fallback models.
+   `SUMMARIZER=auto` prefers Groq when `GROQ_API_KEY` is set, then
+   Gemini when `GEMINI_API_KEY` is set, otherwise a deterministic offline mock — the pipeline
+   runs (and tests pass) with no key and no network.
 4. **Persist** (`repository.py`, `storage.py`) — blobs go to Storage under
    `{project_id}/{sha256}.md` (content-addressed: identical content is stored once, but
    every path still gets its own row), then `directories` are inserted one level at a time
    so parent ids exist, then `files` (with `summary_status='skipped'`).
 
-Nothing is written until every description exists, so a failed run never leaves a
-half-described tree behind; only the job row records the failure.
+A folder whose description failed is stored with `description = NULL` (and the job becomes
+`partial`, with the failing paths in `error`) rather than a placeholder that would match every
+search. Descriptions are produced before anything is written, so a failed run never leaves a
+half-written tree behind.
 
 `mode=add` merges into the existing tree: existing directory paths are reused, new files
 are attached, then every affected directory and its ancestors (deepest first) is re-described
@@ -395,7 +408,7 @@ counts refreshed. Uploaded paths that already exist are rejected with `409`.
 The suite is hermetic — settings are blanked, auth runs in dev mode, and the section tests
 use an in-memory repository, an in-memory object store and each section's mock describer (or,
 for search, the real local scorer). Nothing
-touches Supabase, Gemini or the network.
+touches Supabase, a model provider or the network.
 
 ## Structure
 
@@ -413,7 +426,7 @@ app/
 │  ├─ tree.py         # validation, pruning, ordering, ltree paths
 │  ├─ ingest.py       # multipart / zip parsing and limits
 │  ├─ extract.py      # markdown → prompt text
-│  ├─ describe.py     # directory descriptions (Gemini + mock)
+│  ├─ describe.py     # directory descriptions (Groq/Gemini + mock)
 │  ├─ storage.py      # Supabase Storage, content-addressed keys
 │  ├─ repository.py   # PostgREST access (protocol + Supabase implementation)
 │  └─ tests/
@@ -422,7 +435,7 @@ app/
 │  ├─ service.py      # orchestration, conflicts, one-call description refresh
 │  ├─ navigate.py     # local folder ranking (no model call)
 │  ├─ scoring.py      # the document reduced to a compact query
-│  ├─ describer.py    # batched description refresh (Gemini + mock)
+│  ├─ describer.py    # batched description refresh (Groq/Gemini + mock)
 │  ├─ prompts.py      # the single refresh prompt
 │  ├─ labels.py       # folder + file naming, ltree labels, rename suggestions
 │  ├─ extract.py      # markdown → prompt text
@@ -449,9 +462,11 @@ All settings and defaults live in `app/core/config.py`; env var names are in
 | `AUTH_MODE`, `DEV_USER_ID` | `dev` trusts `X-Dev-User-Id`; `supabase` verifies the bearer token |
 | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` | Service role bypasses RLS — server-side only |
 | `STORAGE_BUCKET` | Bucket for uploaded markdown (default `project-files`) |
-| `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_THINKING_BUDGET` | Directory descriptions only (creation, and the refresh after a placement). `gemini-3.5-flash-lite` has the most free-tier quota; `gemini-3.5-flash` / `gemini-3.6-flash` answer 429 once it is spent. Use a positive budget (e.g. `512`) - the lite models reject `0` with 400 |
-| `SUMMARIZER`, `SUMMARY_MAX_INPUT_CHARS` | `auto` / `gemini` / `mock`; the character cap when a document is read for a prompt |
-| `DESCRIPTION_FILE_HEAD_CHARS`, `DESCRIPTION_MAX_INPUT_CHARS` | How much of each file (1500) and of one folder (24000) reaches a description prompt |
+| `GROQ_API_KEY`, `GROQ_MODEL`, `GROQ_FALLBACK_MODELS`, `GROQ_BASE_URL` | Preferred describer. OpenAI-compatible chat completions through `httpx` (no SDK). `GROK_API_KEY` is accepted as an alias. Default model `openai/gpt-oss-120b`, fallback `openai/gpt-oss-20b`; free tier is 30 RPM / 8K TPM / 1K RPD, and `retry-after` is honoured |
+| `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_THINKING_BUDGET`, `GEMINI_FALLBACK_MODELS` | Alternative describer. `gemini-3.5-flash-lite` has the most free-tier quota; the fallback default starts with the lite models. Use a positive thinking budget (e.g. `512`) - the lite models reject `0` with 400 |
+| `SUMMARIZER`, `SUMMARY_MAX_INPUT_CHARS`, `SUMMARY_CONCURRENCY` | `auto` / `groq` / `gemini` / `mock`; the character cap when a document is read for a prompt; how many folder descriptions run at once (4 by default, 1-2 on a tight TPM budget) |
+| `DESCRIPTION_FILE_HEAD_CHARS`, `DESCRIPTION_MAX_INPUT_CHARS`, `DESCRIPTION_MAX_CHARS` | How much of each file (1500) and of one folder (24000) reaches a description prompt, and the hard ceiling (300 characters) for the description that comes back |
+| `LLM_MIN_INTERVAL_SECONDS` | Minimum gap between the starts of model calls (2 s). Retries and fallback models are paced too, so a free tier is not hammered |
 | `SCORING_FOLDER_THRESHOLD` | Share of a query a folder description must cover before a **search** opens that branch (0.25) |
 | `SEARCH_MAX_FILES_READ`, `SEARCH_MAX_DOCUMENT_CHARS`, `BLOB_CACHE_ENTRIES` | Search's read budget (200 documents), per-document cap (200k characters) and digest cache size (256) |
 | `MAX_UPLOAD_FILES`, `MAX_UPLOAD_BYTES`, `MAX_FILE_BYTES`, `MAX_DIRECTORY_DEPTH` | Upload limits |

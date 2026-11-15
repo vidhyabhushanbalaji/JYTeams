@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
 from fastapi import HTTPException
 
 from app.core.config import get_settings
-from app.graph_creation.describe import MockDescriber
+from app.graph_creation.describe import Description, MockDescriber
 from app.graph_creation.schemas import UploadMode
 from app.graph_creation.service import GraphCreationService
 from app.graph_creation.tests.fakes import (
@@ -19,14 +20,14 @@ from app.graph_creation.tests.fakes import (
 from app.graph_creation.tree import FileEntry
 
 
-def _service(describer: MockDescriber | None = None):
+def _service(describer: MockDescriber | None = None, settings: Any | None = None):
     repository = InMemoryGraphRepository()
     store = InMemoryObjectStore()
     service = GraphCreationService(
         repository=repository,
         store=store,
         describer=describer or MockDescriber(),
-        settings=get_settings(),
+        settings=settings or get_settings(),
     )
     return service, repository, store
 
@@ -228,9 +229,9 @@ async def test_tree_reads_are_nested_and_depth_limited() -> None:
 
 
 class _BrokenDescriber(MockDescriber):
-    """Describer whose Gemini calls all fail (as a retired model would)."""
+    """Describer whose model calls all fail (as a retired model would)."""
 
-    async def describe_directory(self, *, path: str, files: Any, directories: Any) -> str:
+    async def describe_directory(self, *, path: str, files: Any, directories: Any) -> Description:
         raise RuntimeError("gemini exploded")
 
 
@@ -244,10 +245,181 @@ async def test_failed_descriptions_are_reported_on_the_job() -> None:
 
     job = await repository.get_job(prepared.job["id"])
     files = await repository.list_files(prepared.project["id"])
+    directories = await repository.list_directories(prepared.project["id"])
 
     assert job["status"] == "partial"
     assert "item(s) failed" in job["error"]
     assert "gemini exploded" in job["error"]
+    # A failed folder stores nothing, rather than text that would poison search.
+    assert directories[0]["description"] is None
+    assert directories[0]["description_model"] is None
     # The document is still stored; only the folder description failed.
     assert files[0]["summary_status"] == "skipped"
     assert files[0]["summary"] is None
+
+
+class _PathFailingDescriber(MockDescriber):
+    """Fails only for one folder, so its sibling and parent can still be checked."""
+
+    def __init__(self, failing: str) -> None:
+        super().__init__()
+        self.failing = failing
+
+    async def describe_directory(self, *, path: str, files: Any, directories: Any) -> Description:
+        if path == self.failing:
+            raise RuntimeError("model refused")
+        return await super().describe_directory(path=path, files=files, directories=directories)
+
+
+async def test_one_failed_folder_does_not_stop_its_sibling_or_parent() -> None:
+    service, repository, _ = _service(_PathFailingDescriber("docs/api"))
+    prepared = await service.prepare(
+        owner_id="user-1",
+        mode=UploadMode.NEW,
+        entries=[
+            FileEntry("docs/api/auth.md", b"# Auth"),
+            FileEntry("docs/guide.md", b"# Guide"),
+        ],
+    )
+
+    await service.run_job(prepared)
+
+    project_id = prepared.project["id"]
+    directories = {row["path"]: row for row in await repository.list_directories(project_id)}
+    job = await repository.get_job(prepared.job["id"])
+
+    assert directories["docs/api"]["description"] is None
+    assert directories["docs/api"]["description_model"] is None
+    assert directories["docs"]["description"]
+    assert directories[""]["description"]
+    assert job["status"] == "partial"
+    assert "docs/api" in job["error"] and "model refused" in job["error"]
+
+
+async def test_the_model_that_answered_is_recorded_per_folder() -> None:
+    service, repository, _ = _service()
+    prepared = await service.prepare(
+        owner_id="user-1", mode=UploadMode.NEW, entries=[FileEntry("docs/a.md", b"# A")]
+    )
+
+    await service.run_job(prepared)
+
+    directories = {
+        row["path"]: row for row in await repository.list_directories(prepared.project["id"])
+    }
+    assert directories["docs"]["description_model"] == "mock"
+    assert directories[""]["description_model"] == "mock"
+
+
+class _ConcurrentDescriber(MockDescriber):
+    """Records the peak number of descriptions in flight."""
+
+    def __init__(self, delay: float = 0.02) -> None:
+        self.delay = delay
+        self.active = 0
+        self.peak = 0
+
+    async def describe_directory(self, *, path: str, files: Any, directories: Any) -> Description:
+        self.active += 1
+        self.peak = max(self.peak, self.active)
+        try:
+            await asyncio.sleep(self.delay)
+            return await super().describe_directory(path=path, files=files, directories=directories)
+        finally:
+            self.active -= 1
+
+
+async def test_sibling_folders_are_described_concurrently() -> None:
+    describer = _ConcurrentDescriber()
+    settings = get_settings().model_copy(update={"summary_concurrency": 3})
+    service, repository, _ = _service(describer, settings)
+    prepared = await service.prepare(
+        owner_id="user-1",
+        mode=UploadMode.NEW,
+        entries=[
+            FileEntry("a/one.md", b"# One"),
+            FileEntry("b/two.md", b"# Two"),
+            FileEntry("c/three.md", b"# Three"),
+        ],
+    )
+
+    await service.run_job(prepared)
+
+    assert describer.peak == 3
+    job = await repository.get_job(prepared.job["id"])
+    assert job["status"] == "ok"
+    assert job["processed_files"] == 3
+
+
+class _PromptRecordingDescriber(MockDescriber):
+    """Keeps the subfolder descriptions each folder was given."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.subfolders: dict[str, list[tuple[str, str]]] = {}
+
+    async def describe_directory(self, *, path: str, files: Any, directories: Any) -> Description:
+        self.subfolders[path] = list(directories)
+        return await super().describe_directory(path=path, files=files, directories=directories)
+
+
+async def test_a_parent_is_described_from_its_childrens_descriptions() -> None:
+    describer = _PromptRecordingDescriber()
+    service, _, _ = _service(describer)
+    prepared = await service.prepare(
+        owner_id="user-1",
+        mode=UploadMode.NEW,
+        entries=[FileEntry("docs/api/auth.md", b"# Auth")],
+    )
+
+    await service.run_job(prepared)
+
+    assert [name for name, _ in describer.subfolders["docs"]] == ["api"]
+    child_description = describer.subfolders["docs"][0][1]
+    assert child_description != "no description"
+    assert [name for name, _ in describer.subfolders[""]] == ["docs"]
+    assert describer.subfolders[""][0][1].startswith("docs holds")
+
+
+class _VerboseDescriber(MockDescriber):
+    """Returns far more text than a description should ever store."""
+
+    async def describe_directory(self, *, path: str, files: Any, directories: Any) -> Description:
+        return Description(text="word " * 200, model="verbose")
+
+
+async def test_every_description_is_clipped_to_the_character_cap() -> None:
+    service, repository, _ = _service(_VerboseDescriber())
+    prepared = await service.prepare(
+        owner_id="user-1",
+        mode=UploadMode.NEW,
+        entries=[FileEntry("docs/a.md", b"# A"), FileEntry("README.md", b"# Root")],
+    )
+
+    await service.run_job(prepared)
+
+    for row in await repository.list_directories(prepared.project["id"]):
+        assert row["description"]
+        assert len(row["description"]) <= 300
+        assert row["description"].endswith("…")
+
+
+async def test_the_add_refresh_is_clipped_too() -> None:
+    service, repository, _ = _service(_VerboseDescriber())
+    first = await service.prepare(
+        owner_id="user-1", mode=UploadMode.NEW, entries=[FileEntry("docs/a.md", b"# A")]
+    )
+    await service.run_job(first)
+    project_id = first.project["id"]
+
+    second = await service.prepare(
+        owner_id="user-1",
+        mode=UploadMode.ADD,
+        project_id=project_id,
+        entries=[FileEntry("docs/b.md", b"# B")],
+    )
+    await service.run_job(second)
+
+    for row in await repository.list_directories(project_id):
+        assert row["description"]
+        assert len(row["description"]) <= 300

@@ -1,4 +1,4 @@
-"""In-memory collaborators so the section can be tested without Supabase or Gemini."""
+"""In-memory collaborators so the section can be tested without Supabase or a model provider."""
 
 from __future__ import annotations
 

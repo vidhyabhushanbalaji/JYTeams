@@ -168,7 +168,7 @@ async def preview_local(entries: list[tuple[str, bytes]], *, full: bool) -> int:
             texts[entry.path] = (
                 extracted.text if extracted.ok else f"(not included: {extracted.reason})"
             )
-        descriptions[node.path] = await describer.describe_directory(
+        result = await describer.describe_directory(
             path=node.path,
             files=trim_for_prompt(
                 [(entry.name, texts[entry.path]) for entry in node.files],
@@ -177,6 +177,7 @@ async def preview_local(entries: list[tuple[str, bytes]], *, full: bool) -> int:
             ),
             directories=[(child.name, descriptions[child.path]) for child in node.directories],
         )
+        descriptions[node.path] = result.text
 
     directories = list(postorder(tree))
     print(f"DRY RUN - {tree.total_files} file(s), {len(directories)} directory node(s), no network")

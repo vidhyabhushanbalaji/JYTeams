@@ -5,7 +5,7 @@ from __future__ import annotations
 import itertools
 from typing import Any
 
-from app.graph_creation.describe import MockDescriber
+from app.graph_creation.describe import Description, MockDescriber
 from app.graph_creation.storage import StorageError, StoredObject
 
 Row = dict[str, Any]
@@ -129,8 +129,9 @@ class RecordingDescriber(MockDescriber):
     """Mock describer that records the order it was called in."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.calls: list[tuple[str, str]] = []
 
-    async def describe_directory(self, *, path: str, files: Any, directories: Any) -> str:
+    async def describe_directory(self, *, path: str, files: Any, directories: Any) -> Description:
         self.calls.append(("directory", path))
         return await super().describe_directory(path=path, files=files, directories=directories)

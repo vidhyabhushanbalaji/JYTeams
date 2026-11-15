@@ -18,6 +18,7 @@ import type {
 
 import { describeError, isExpired, retryNames } from '../lib/errors'
 import { humanBytes, scoreText } from '../lib/format'
+import { documentPreview, scanSummary, visibleTerms } from '../lib/payloads'
 import { Dialog, Spinner } from './primitives'
 
 type Step = 'choose' | 'suggesting' | 'suggested' | 'placing' | 'error'
@@ -174,15 +175,15 @@ export function AddDocumentFlow({
             {file.name}
             <span className="muted">{humanBytes(file.sizeBytes)}</span>
           </span>
-          {suggestion ? <p className="doc-summary__text">{suggestion.file.summary}</p> : null}
+          {suggestion ? <p className="doc-summary__text">{documentPreview(suggestion.file)}</p> : null}
         </div>
       ) : null}
 
       {step === 'choose' ? (
         <p className="side__empty">
-          The document is summarised first, then the project is walked from the root and only the
-          folders that could plausibly hold it are opened. You always get the project root as an
-          option.
+          Every folder is scored locally against the document&apos;s title, filename and most
+          frequent terms — no model is called. The best three are offered and the project root is
+          always available as a fallback.
         </p>
       ) : null}
 
@@ -191,7 +192,7 @@ export function AddDocumentFlow({
           <span className="side__label">Reading the tree</span>
           <p className="side__text">
             <Spinner label="Finding a place" />{' '}
-            <span style={{ marginLeft: 8 }}>Summarising the document, then walking the folders.</span>
+            <span style={{ marginLeft: 8 }}>Scoring every folder against the document.</span>
           </p>
         </div>
       ) : null}
@@ -228,6 +229,15 @@ export function AddDocumentFlow({
                   />
                 </span>
                 <span className="suggestion__reason">{item.reason}</span>
+                {item.matched_terms.length > 0 ? (
+                  <span className="chips">
+                    {visibleTerms(item.matched_terms).map((term) => (
+                      <span key={term} className="chip">
+                        {term}
+                      </span>
+                    ))}
+                  </span>
+                ) : null}
                 <span className="suggestion__meta">
                   {item.direct_file_count} files · {item.child_directory_count} folders
                   {item.is_leaf ? ' · leaf' : ''}
@@ -237,12 +247,7 @@ export function AddDocumentFlow({
             ))}
           </div>
 
-          <p className="side__empty">
-            Walked {suggestion.traversal.visited} folders and opened {suggestion.traversal.expanded} ·{' '}
-            {suggestion.traversal.model}
-            {suggestion.traversal.degraded ? ' · answered without the model for part of the walk' : ''}
-            {suggestion.traversal.budget_exhausted ? ' · stopped at the walk budget' : ''}
-          </p>
+          <p className="side__empty">{scanSummary(suggestion.scan)}</p>
 
           {selected ? (
             <div className="choice">

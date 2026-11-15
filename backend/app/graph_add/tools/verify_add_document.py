@@ -14,7 +14,7 @@ project tree that already holds files, and drives ``POST /suggestions`` →
 exit code is the result: 0 when all checks pass, 1 otherwise.
 
 No services are touched: the section's in-memory repository and object store stand in for
-Supabase, and the offline ``MockFolderDescriber`` replaces Gemini — the same collaborators the
+Supabase, and the offline ``MockFolderDescriber`` replaces the model — the same collaborators the
 test suite uses. That makes this a runnable smoke test on a machine with no ``.env``, and a
 readable demo of the contract (``--json`` dumps the payloads and the final tree).
 

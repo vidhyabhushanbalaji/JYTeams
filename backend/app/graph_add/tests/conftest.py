@@ -21,6 +21,8 @@ def _isolate_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "SUPABASE_ANON_KEY",
         "SUPABASE_SERVICE_ROLE_KEY",
         "GEMINI_API_KEY",
+        "GROQ_API_KEY",
+        "GROK_API_KEY",
         "CORS_ORIGINS",
     ):
         monkeypatch.setenv(name, "")

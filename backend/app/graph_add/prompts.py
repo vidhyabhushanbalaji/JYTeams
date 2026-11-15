@@ -19,9 +19,10 @@ _TEXT_CHARS = 4_000
 REFRESH_PROMPT = (
     "You maintain the folder descriptions of a project knowledge tree. A new document has just "
     "been placed, so the folders around it need their descriptions updated. For every folder "
-    "listed, write 2-4 sentences describing what it and everything under it contains, naming the "
-    "topics, tools and concepts explicitly, because a search matches this text to find the "
-    "folder. Keep what is still true, add what the new document brings, and never invent names."
+    "listed, write at most {max_chars} characters (about two sentences) describing what it and "
+    "everything under it contains, naming the topics, tools and concepts explicitly, because a "
+    "search matches this text to find the folder. Keep what is still true, add what the new "
+    "document brings, and never invent names."
     "\n\n"
     "New document: {name}\n"
     "Placed in folder: {folder}\n\n"
@@ -40,7 +41,11 @@ TARGET_BLOCK = (
 
 
 def refresh_prompt(
-    *, document: DocumentContext, targets: Sequence[TargetContext], text_limit: int = _TEXT_CHARS
+    *,
+    document: DocumentContext,
+    targets: Sequence[TargetContext],
+    text_limit: int = _TEXT_CHARS,
+    max_chars: int = 300,
 ) -> str:
     """Prompt asking for the updated description of every affected folder."""
     text = document.text or ""
@@ -50,6 +55,7 @@ def refresh_prompt(
         name=document.name,
         folder=document.directory_path or "(project root)",
         text=text,
+        max_chars=max_chars,
         targets="\n".join(
             TARGET_BLOCK.format(
                 index=index,

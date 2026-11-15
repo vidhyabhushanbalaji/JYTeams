@@ -139,12 +139,9 @@ export const FileNode = memo(function FileNode({ data }: NodeProps<GraphFlowNode
         <PageGlyph />
         <span className="node__name">{node.label}</span>
       </div>
-      <p className={node.description ? 'node__desc' : 'node__desc node__desc--empty'}>
-        {node.description ?? 'No summary yet'}
-      </p>
       <div className="node__footer">
         <span>{humanBytes(node.sizeBytes ?? 0)}</span>
-        {node.status && node.status !== 'ok' ? (
+        {node.status && node.status !== 'ok' && node.status !== 'skipped' ? (
           <span className={`node__status node__status--${node.status}`}>{node.status}</span>
         ) : null}
       </div>

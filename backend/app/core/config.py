@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # backend/app/core/config.py -> parents[2] == backend/
@@ -15,6 +15,16 @@ BACKEND_DIR = Path(__file__).resolve().parents[2]
 ENV_FILE = BACKEND_DIR / ".env"
 
 DEFAULT_DEV_USER_ID = "00000000-0000-0000-0000-000000000001"
+
+
+def _model_chain(primary: str, fallbacks: str) -> tuple[str, ...]:
+    """The primary model first, then the comma-separated fallbacks, deduplicated."""
+    names: list[str] = []
+    for name in (primary, *fallbacks.split(",")):
+        value = name.strip()
+        if value and value not in names:
+            names.append(value)
+    return tuple(names)
 
 
 class Settings(BaseSettings):
@@ -29,6 +39,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        populate_by_name=True,
     )
 
     app_env: str = "dev"
@@ -49,24 +60,45 @@ class Settings(BaseSettings):
     auth_mode: Literal["dev", "supabase"] = "dev"
     dev_user_id: str = DEFAULT_DEV_USER_ID
 
-    # Gemini. Reserved for the Graph AI Search section; used here only by the
-    # "gemini" summariser.
+    # Gemini (google-genai). Used by the "gemini" describer.
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.6-flash"
+    #: Comma separated models tried, in order, when the primary one is unavailable or spent.
+    #: The lite models are first because they carry the most free-tier quota.
+    gemini_fallback_models: str = (
+        "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.7-flash,gemini-3.5-flash"
+    )
     # Positive values cap thinking (faster, cheaper summaries). 0, blank or negative omits
     # the thinking config entirely - which the *-flash-lite models require, because they
     # reject a budget of 0 with 400 INVALID_ARGUMENT.
     gemini_thinking_budget: int | None = 0
 
-    # Summarisation. "auto" uses Gemini when a key is present, otherwise a local mock.
-    summarizer: Literal["auto", "gemini", "mock"] = "auto"
+    # Groq (OpenAI-compatible chat completions, called through httpx). Used by the "groq"
+    # describer. GROK_API_KEY is accepted as an alias because it is easy to mistype.
+    groq_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("GROQ_API_KEY", "GROK_API_KEY"),
+    )
+    groq_model: str = "openai/gpt-oss-120b"
+    #: Comma separated models tried after ``groq_model`` (a model can be rate limited alone).
+    groq_fallback_models: str = "openai/gpt-oss-20b"
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+
+    # Describers. "auto" prefers Groq, then Gemini, otherwise the offline mock.
+    summarizer: Literal["auto", "gemini", "groq", "mock"] = "auto"
     summary_max_input_chars: int = 12_000
+    #: Folder descriptions written at once (creation). Groq's free tier (8K TPM) may prefer 1-2.
+    summary_concurrency: int = Field(default=4, ge=1, le=16)
+    #: Minimum seconds between the starts of model calls (0 disables). Free tiers dislike bursts.
+    llm_min_interval_seconds: float = Field(default=2.0, ge=0, le=60)
 
     # Directory descriptions (Graph Creation, and the refresh after a placement). A folder's
     # prompt is built from the text of the files directly inside it, so two caps keep one large
     # folder from producing an enormous request.
     description_file_head_chars: int = 1_500
     description_max_input_chars: int = 24_000
+    #: Hard ceiling for one folder description, in characters. The prompt asks for this too.
+    description_max_chars: int = Field(default=300, ge=120, le=2_000)
 
     # Local (model-free) matching, shared by Graph AI Search and Graph Add suggestions. The
     # folder threshold is the share of the query a folder description must cover before the
@@ -101,11 +133,23 @@ class Settings(BaseSettings):
         return bool(self.supabase_url and self.supabase_service_role_key)
 
     @property
-    def resolved_summarizer(self) -> Literal["gemini", "mock"]:
-        """Which summariser to use, resolving ``auto`` against the Gemini key."""
+    def resolved_summarizer(self) -> Literal["gemini", "groq", "mock"]:
+        """Which describer to use, resolving ``auto`` against the configured keys."""
         if self.summarizer == "auto":
+            if self.groq_api_key:
+                return "groq"
             return "gemini" if self.gemini_api_key else "mock"
         return self.summarizer
+
+    @property
+    def groq_models(self) -> tuple[str, ...]:
+        """The Groq model followed by its fallbacks, deduplicated."""
+        return _model_chain(self.groq_model, self.groq_fallback_models)
+
+    @property
+    def gemini_models(self) -> tuple[str, ...]:
+        """The Gemini model followed by its fallbacks, deduplicated."""
+        return _model_chain(self.gemini_model, self.gemini_fallback_models)
 
 
 @lru_cache(maxsize=1)

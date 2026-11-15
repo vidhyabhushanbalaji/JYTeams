@@ -1,4 +1,4 @@
-/** Graph AI Search is one read: the walk costs model calls, so the UI runs it deliberately. */
+/** Graph AI Search is one read: no model is called, but a search may read many documents. */
 
 import type { SearchResults } from '../../shared/types'
 import { LONG_TIMEOUT_MS, request } from './client'

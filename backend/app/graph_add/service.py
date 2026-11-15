@@ -23,6 +23,7 @@ from pathlib import PurePosixPath
 from fastapi import HTTPException, status
 
 from app.core.config import Settings
+from app.core.text import clip_description
 from app.graph_add.describer import DocumentContext, FolderDescriber, TargetContext
 from app.graph_add.extract import extract_text
 from app.graph_add.labels import (
@@ -514,6 +515,7 @@ class GraphAddService:
             payload: Row = dict(counts)
             text = updates.get(target.path)
             if text:
+                text = clip_description(text, self._settings.description_max_chars)
                 payload["description"] = text
                 payload["description_model"] = self._describer.model_name
             await self._repository.update_directory(str(row["id"]), payload)

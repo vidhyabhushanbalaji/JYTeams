@@ -2,8 +2,8 @@
  * Choose a folder, see exactly what will be sent, then follow the background job.
  *
  * The upload itself only ingests the files (the API answers 202 with a job id); every
- * summary is produced afterwards, so the progress bar is driven by GET /jobs/{id} until it
- * reports ok, partial or failed.
+ * folder description is produced afterwards, so the progress bar is driven by GET /jobs/{id}
+ * until it reports ok, partial or failed.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -18,7 +18,7 @@ type Step = 'choose' | 'review' | 'uploading' | 'running' | 'error'
 
 const STEP_LABEL: Record<string, string> = {
   queued: 'Queued',
-  summarising: 'Summarising',
+  summarising: 'Describing',
   persisting: 'Writing the tree',
   ok: 'Done',
   partial: 'Done, with skipped files',
@@ -28,11 +28,13 @@ const STEP_LABEL: Record<string, string> = {
 export function NewProjectFlow({
   open,
   onClose,
-  onCreated
+  onCreated,
+  onWarning
 }: {
   open: boolean
   onClose: () => void
   onCreated: (projectId: string) => void
+  onWarning?: (message: string) => void
 }) {
   const [step, setStep] = useState<Step>('choose')
   const [folderPath, setFolderPath] = useState<string | null>(null)
@@ -45,6 +47,8 @@ export function NewProjectFlow({
 
   const created = useRef(onCreated)
   created.current = onCreated
+  const warning = useRef(onWarning)
+  warning.current = onWarning
 
   const reset = useCallback(() => {
     setStep('choose')
@@ -82,7 +86,14 @@ export function NewProjectFlow({
       } else {
         failures = 0
         setJob(result.data)
-        if (result.data.status === 'ok' || result.data.status === 'partial') {
+        if (result.data.status === 'partial') {
+          warning.current?.(
+            result.data.error ?? 'Some folder descriptions could not be written.'
+          )
+          created.current(result.data.project_id)
+          return
+        }
+        if (result.data.status === 'ok') {
           created.current(result.data.project_id)
           return
         }
@@ -267,8 +278,9 @@ export function NewProjectFlow({
             <div className="progress__fill" style={{ width: `${progress}%` }} />
           </div>
           <p className="side__empty">
-            Every file is summarised, then every folder is described from the summaries below it,
-            finishing with the root. Nothing is written until all of that has succeeded.
+            Each folder is described from the text of the files inside it plus the descriptions of
+            its subfolders, starting at the leaves and finishing with the root. Documents themselves
+            are stored, not summarised. Nothing is written until all of that has succeeded.
           </p>
         </div>
       ) : null}

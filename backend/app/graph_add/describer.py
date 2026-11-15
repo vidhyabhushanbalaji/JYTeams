@@ -1,4 +1,4 @@
-"""Folder describers: Gemini for real use, a deterministic mock for tests.
+"""Folder describers: Groq or Gemini for real use, a deterministic mock for tests.
 
 Graph Add no longer summarises the document it places. After a placement it asks for the updated
 description of every affected folder — the new folder (if one was created), the folder it landed
@@ -15,6 +15,9 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from app.core.config import Settings
+from app.core.groq import DEFAULT_BASE_URL, GroqClient
+from app.core.pacing import RequestPacer
+from app.core.text import clip_description
 from app.graph_add import prompts
 
 logger = logging.getLogger(__name__)
@@ -65,6 +68,26 @@ def _json_object(text: str) -> dict[str, Any]:
     return payload
 
 
+def _updates_from(
+    reply: str, targets: Sequence[TargetContext], *, max_chars: int = 300
+) -> dict[str, str]:
+    """Keep the descriptions that name a target path; ignore everything else."""
+    entries = _json_object(reply).get("descriptions")
+    if not isinstance(entries, list):
+        return {}
+
+    wanted = {target.path for target in targets}
+    updates: dict[str, str] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("path") or "")
+        description = " ".join(str(entry.get("description") or "").split())
+        if path in wanted and description:
+            updates[path] = clip_description(description, max_chars)
+    return updates
+
+
 class GeminiFolderDescriber:
     """Google Gemini implementation (``google-genai``, already a dependency)."""
 
@@ -74,6 +97,8 @@ class GeminiFolderDescriber:
         api_key: str,
         model: str,
         max_output_tokens: int = 1024,
+        max_chars: int = 300,
+        min_interval_seconds: float = 0.0,
         client: Any | None = None,
     ) -> None:
         if client is None:
@@ -85,10 +110,13 @@ class GeminiFolderDescriber:
         self._client = client
         self.model_name = model
         self._max_output_tokens = max_output_tokens
+        self._max_chars = max_chars
+        self._pacer = RequestPacer(min_interval_seconds)
 
     async def _generate(self, prompt: str) -> str:
         from google.genai import types
 
+        await self._pacer.wait()
         response = await self._client.aio.models.generate_content(
             model=self.model_name,
             contents=prompt,
@@ -108,21 +136,10 @@ class GeminiFolderDescriber:
     ) -> dict[str, str]:
         if not targets:
             return {}
-        raw = await self._generate(prompts.refresh_prompt(document=document, targets=targets))
-        entries = _json_object(raw).get("descriptions")
-        if not isinstance(entries, list):
-            return {}
-
-        wanted = {target.path for target in targets}
-        updates: dict[str, str] = {}
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            path = str(entry.get("path") or "")
-            description = " ".join(str(entry.get("description") or "").split())
-            if path in wanted and description:
-                updates[path] = description
-        return updates
+        raw = await self._generate(
+            prompts.refresh_prompt(document=document, targets=targets, max_chars=self._max_chars)
+        )
+        return _updates_from(raw, targets, max_chars=self._max_chars)
 
 
 class MockFolderDescriber:
@@ -134,25 +151,92 @@ class MockFolderDescriber:
 
     model_name = "mock"
 
+    def __init__(self, *, max_chars: int = 300) -> None:
+        self._max_chars = max_chars
+
     async def update_descriptions(
         self, *, document: DocumentContext, targets: Sequence[TargetContext]
     ) -> dict[str, str]:
         return {
-            target.path: (
-                f"{target.path or 'the project root'} holds {len(target.files)} file(s) and "
-                f"{len(target.subfolders)} subfolder(s). "
-                f"Files: {', '.join(target.files[:5]) or 'none'}. "
-                f"Subfolders: "
-                f"{', '.join(name for name, _ in target.subfolders[:5]) or 'none'}. "
-                f"{document.name} was added here."
+            target.path: clip_description(
+                (
+                    f"{target.path or 'the project root'} holds {len(target.files)} file(s) and "
+                    f"{len(target.subfolders)} subfolder(s). "
+                    f"Files: {', '.join(target.files[:5]) or 'none'}. "
+                    f"Subfolders: "
+                    f"{', '.join(name for name, _ in target.subfolders[:5]) or 'none'}. "
+                    f"{document.name} was added here."
+                ),
+                self._max_chars,
             )
             for target in targets
         }
 
 
+class GroqFolderDescriber:
+    """Groq implementation (OpenAI-compatible chat completions).
+
+    ``GroqClient`` owns retries, rate limits and the model fallback chain; the JSON contract is
+    unchanged, so a placement behaves the same whichever provider wrote the descriptions.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        fallback_models: Sequence[str] = (),
+        base_url: str = DEFAULT_BASE_URL,
+        max_output_tokens: int = 1024,
+        max_chars: int = 300,
+        min_interval_seconds: float = 0.0,
+        client: GroqClient | None = None,
+    ) -> None:
+        if client is None:
+            client = GroqClient(
+                api_key=api_key,
+                model=model,
+                fallback_models=fallback_models,
+                base_url=base_url,
+                min_interval_seconds=min_interval_seconds,
+            )
+        self._client = client
+        self.model_name = client.model_name
+        self._max_output_tokens = max_output_tokens
+        self._max_chars = max_chars
+
+    async def update_descriptions(
+        self, *, document: DocumentContext, targets: Sequence[TargetContext]
+    ) -> dict[str, str]:
+        if not targets:
+            return {}
+        completion = await self._client.complete(
+            prompts.refresh_prompt(document=document, targets=targets, max_chars=self._max_chars),
+            max_tokens=self._max_output_tokens,
+            json_mode=True,
+        )
+        return _updates_from(completion.text, targets, max_chars=self._max_chars)
+
+
 def build_describer(settings: Settings) -> FolderDescriber:
     """Pick the describer for the current configuration (same switch as the other sections)."""
-    if settings.resolved_summarizer == "gemini":
-        return GeminiFolderDescriber(api_key=settings.gemini_api_key, model=settings.gemini_model)
-    logger.info("Using the offline mock describer (no GEMINI_API_KEY configured)")
-    return MockFolderDescriber()
+    provider = settings.resolved_summarizer
+    if provider == "groq":
+        logger.info("Using the Groq folder describer (%s)", settings.groq_model)
+        return GroqFolderDescriber(
+            api_key=settings.groq_api_key,
+            model=settings.groq_model,
+            fallback_models=settings.groq_models[1:],
+            base_url=settings.groq_base_url,
+            max_chars=settings.description_max_chars,
+            min_interval_seconds=settings.llm_min_interval_seconds,
+        )
+    if provider == "gemini":
+        return GeminiFolderDescriber(
+            api_key=settings.gemini_api_key,
+            model=settings.gemini_model,
+            max_chars=settings.description_max_chars,
+            min_interval_seconds=settings.llm_min_interval_seconds,
+        )
+    logger.info("Using the offline mock describer (no model configured)")
+    return MockFolderDescriber(max_chars=settings.description_max_chars)

@@ -8,7 +8,12 @@ from typing import Any
 import pytest
 
 from app.graph_creation import describe
-from app.graph_creation.describe import GeminiDescriber, MockDescriber, trim_for_prompt
+from app.graph_creation.describe import (
+    GeminiDescriber,
+    GroqDescriber,
+    MockDescriber,
+    trim_for_prompt,
+)
 
 
 class _Response:
@@ -60,7 +65,8 @@ def _describer(
 
 async def _describe(describer: GeminiDescriber, name: str = "a.md", text: str = "# A") -> str:
     """Describe one folder, so the retry tests exercise the real prompt path."""
-    return await describer.describe_directory(path="folder", files=[(name, text)], directories=[])
+    result = await describer.describe_directory(path="folder", files=[(name, text)], directories=[])
+    return result.text
 
 
 def test_requires_an_api_key_when_building_its_own_client() -> None:
@@ -180,6 +186,7 @@ async def test_the_prompt_carries_the_file_text_and_the_child_descriptions() -> 
     assert "### deployment.md" in prompt
     assert "Roll back with Helm." in prompt
     assert "- rollback: Reverting a bad release." in prompt
+    assert "at most 300 characters" in prompt
 
 
 def test_trim_for_prompt_caps_each_file_and_the_folder_total() -> None:
@@ -201,12 +208,47 @@ def test_trim_for_prompt_keeps_short_files_untouched() -> None:
 
 
 async def test_the_mock_describer_names_the_files_and_their_headings() -> None:
-    description = await MockDescriber().describe_directory(
+    result = await MockDescriber().describe_directory(
         path="docs",
         files=[("alpha.md", "# Alpha\n\nbody"), ("beta.md", "# Beta")],
         directories=[("api", "Endpoints.")],
     )
 
+    description = result.text
+    assert result.model == "mock"
     assert "docs holds 2 file(s) and 1 subfolder(s)." in description
     assert "Alpha" in description and "Beta" in description
     assert "Subfolders: api." in description
+
+
+class _GroqStub:
+    """Records the prompt and returns a fixed answer, like ``GroqClient.complete``."""
+
+    def __init__(self, text: str = "A guide.", model: str = "openai/gpt-oss-120b") -> None:
+        self.model_name = model
+        self.text = text
+        self.prompts: list[str] = []
+
+    async def complete(self, prompt: str, *, max_tokens: int = 1024, json_mode: bool = False):
+        from app.core.groq import Completion
+
+        self.prompts.append(prompt)
+        return Completion(text=self.text, model=self.model_name)
+
+
+async def test_the_groq_describer_uses_the_same_prompt_and_reports_the_model() -> None:
+    client = _GroqStub("Deployment and rollback material.")
+    describer = GroqDescriber(api_key="", model="openai/gpt-oss-120b", client=client)
+
+    result = await describer.describe_directory(
+        path="guides",
+        files=[("deployment.md", "Roll back with Helm.")],
+        directories=[("rollback", "Reverting a bad release.")],
+    )
+
+    assert result.text == "Deployment and rollback material."
+    assert result.model == "openai/gpt-oss-120b"
+    prompt = client.prompts[0]
+    assert "Folder: guides" in prompt
+    assert "Roll back with Helm." in prompt
+    assert "- rollback: Reverting a bad release." in prompt

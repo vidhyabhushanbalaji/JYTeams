@@ -5,8 +5,9 @@ directly inside it (heads, capped) plus the descriptions of its child directorie
 described bottom-up, so the root ends up describing the whole project. That is one model call per
 directory instead of one per file plus one per directory.
 
-Two implementations exist - ``GeminiDescriber`` (real) and ``MockDescriber`` (deterministic, no
-network) - selected by ``SUMMARIZER``/``GEMINI_API_KEY``.
+Three implementations exist - ``GroqDescriber`` (OpenAI-compatible, via ``app.core.groq``),
+``GeminiDescriber`` (real) and ``MockDescriber`` (deterministic, no network) - selected by
+``SUMMARIZER`` and the configured API keys.
 
 Because a description is now the only thing a local search can match a folder on, the prompt asks
 for the words a reader would search for (tool names, error codes, concepts) rather than a neutral
@@ -28,9 +29,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from app.core.config import Settings
+from app.core.groq import DEFAULT_BASE_URL, GroqClient
+from app.core.pacing import RequestPacer
+from app.core.text import clip_description
 
 logger = logging.getLogger(__name__)
 
@@ -87,17 +92,25 @@ def _finish_reason(response: object) -> str:
 
 
 DIRECTORY_PROMPT = (
-    "You are describing one folder in a project knowledge tree. Write 2-4 sentences "
-    "describing what this folder and everything under it contains, for someone deciding "
-    "whether to open it. Name the topics, tools, commands and concepts explicitly, because a "
-    "search matches this text to find the folder. Base it only on the entries below; never "
-    "invent names.\n\n"
+    "You are describing one folder in a project knowledge tree. Write at most {max_chars} "
+    "characters (about two sentences) describing what this folder and everything under it "
+    "contains, for someone deciding whether to open it. Name the topics, tools, commands and "
+    "concepts explicitly, because a search matches this text to find the folder. Base it only "
+    "on the entries below; never invent names.\n\n"
     "Folder: {path}\n\n"
     "Files directly inside:\n{files}\n\n"
     "Subfolders:\n{subdirectories}"
 )
 
 FILE_BLOCK = "### {name}\n{text}"
+
+
+@dataclass(frozen=True)
+class Description:
+    """One folder description, and the model that actually wrote it."""
+
+    text: str
+    model: str | None = None
 
 
 class Describer(Protocol):
@@ -111,7 +124,7 @@ class Describer(Protocol):
         path: str,
         files: Sequence[tuple[str, str]],
         directories: Sequence[tuple[str, str]],
-    ) -> str: ...
+    ) -> Description: ...
 
 
 def _bullet_list(entries: Sequence[tuple[str, str]], empty: str = "(none)") -> str:
@@ -159,6 +172,10 @@ class MockDescriber:
     """Deterministic, offline describer used by tests and keyless local runs."""
 
     model_name = "mock"
+    _max_chars = 300
+
+    def __init__(self, *, max_chars: int = 300) -> None:
+        self._max_chars = max_chars
 
     async def describe_directory(
         self,
@@ -166,7 +183,7 @@ class MockDescriber:
         path: str,
         files: Sequence[tuple[str, str]],
         directories: Sequence[tuple[str, str]],
-    ) -> str:
+    ) -> Description:
         label = path or "the project root"
         parts = [f"{label} holds {len(files)} file(s) and {len(directories)} subfolder(s)."]
         if files:
@@ -175,7 +192,9 @@ class MockDescriber:
         if directories:
             names = ", ".join(name for name, _ in directories[:5])
             parts.append(f"Subfolders: {names}.")
-        return " ".join(parts)
+        return Description(
+            text=clip_description(" ".join(parts), self._max_chars), model=self.model_name
+        )
 
 
 class GeminiDescriber:
@@ -188,6 +207,9 @@ class GeminiDescriber:
         model: str,
         max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
         thinking_budget: int | None = 0,
+        fallback_models: Sequence[str] | None = None,
+        max_chars: int = 300,
+        min_interval_seconds: float = 0.0,
         client: Any | None = None,
     ) -> None:
         if client is None:
@@ -204,8 +226,11 @@ class GeminiDescriber:
         self.model_name = model
         self._max_output_tokens = max_output_tokens
         self._thinking_budget = thinking_budget
+        self._max_chars = max_chars
+        self._pacer = RequestPacer(min_interval_seconds)
         # Models that rejected a thinking config (the *-flash-lite family does).
         self._thinking_supported: dict[str, bool] = {}
+        self._fallback_models = tuple(fallback_models) if fallback_models else _FALLBACK_MODELS
 
     def _wants_thinking(self, model: str) -> bool:
         """Thinking is opt-in: only a positive budget is sent, and only if accepted."""
@@ -226,22 +251,26 @@ class GeminiDescriber:
         return types.GenerateContentConfig(**options)
 
     def _models(self) -> tuple[str, ...]:
-        """Configured model first, then other flash models when it is unavailable."""
+        """Configured model first, then the configured fallbacks."""
         return (self.model_name,) + tuple(
-            model for model in _FALLBACK_MODELS if model != self.model_name
+            model for model in self._fallback_models if model != self.model_name
         )
 
     async def _call(self, *, model: str, prompt: str, include_thinking: bool):
         """One request, returning the raw SDK response."""
+        waited = await self._pacer.wait()
+        if waited:
+            logger.debug("Paced %.2fs before calling %s", waited, model)
         return await self._client.aio.models.generate_content(
             model=model,
             contents=prompt,
             config=self._generation_config(include_thinking=include_thinking),
         )
 
-    async def _generate(self, prompt: str) -> str:
+    async def _generate(self, prompt: str) -> Description:
         """Call Gemini, retrying overloads and moving on to other models when needed."""
         last_error: Exception | None = None
+        failures: list[str] = []
         for model in self._models():
             for attempt in range(1, _MAX_ATTEMPTS + 1):
                 include_thinking = self._wants_thinking(model)
@@ -252,6 +281,7 @@ class GeminiDescriber:
                 except Exception as exc:  # noqa: BLE001 - classified right below
                     last_error = exc
                     kind = _classify(exc)
+                    failures.append(f"{model}: {kind}: {str(exc)[:160]}")
                     if kind == "fatal":
                         raise
                     if kind == "invalid" and include_thinking:
@@ -284,12 +314,13 @@ class GeminiDescriber:
 
                 text = (getattr(response, "text", None) or "").strip()
                 if text:
-                    return text
+                    return Description(text=text, model=model)
 
                 last_error = ValueError(
                     "Gemini returned an empty description "
                     f"(finish_reason={_finish_reason(response)})"
                 )
+                failures.append(f"{model}: empty response")
                 if include_thinking:
                     # Thinking tokens can consume the whole output budget.
                     self._thinking_supported[model] = False
@@ -297,7 +328,8 @@ class GeminiDescriber:
                 logger.warning("Model %s returned no text; trying the next model", model)
                 break
 
-        raise RuntimeError("Gemini failed for every model") from last_error
+        detail = "; ".join(failures[-6:])
+        raise RuntimeError(f"Gemini failed for every model: {detail}") from last_error
 
     async def describe_directory(
         self,
@@ -305,23 +337,92 @@ class GeminiDescriber:
         path: str,
         files: Sequence[tuple[str, str]],
         directories: Sequence[tuple[str, str]],
-    ) -> str:
+    ) -> Description:
         return await self._generate(
             DIRECTORY_PROMPT.format(
                 path=path or "(project root)",
                 files=_file_blocks(files),
                 subdirectories=_bullet_list(directories),
+                max_chars=self._max_chars,
             )
+        )
+
+
+class GroqDescriber:
+    """Groq implementation (OpenAI-compatible chat completions).
+
+    ``GroqClient`` owns retries, rate limits and the model fallback chain; this class only
+    builds the same prompt the Gemini describer uses, so a project looks the same whichever
+    provider wrote it.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        fallback_models: Sequence[str] = (),
+        base_url: str = DEFAULT_BASE_URL,
+        max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
+        max_chars: int = 300,
+        min_interval_seconds: float = 0.0,
+        client: GroqClient | None = None,
+    ) -> None:
+        if client is None:
+            client = GroqClient(
+                api_key=api_key,
+                model=model,
+                fallback_models=fallback_models,
+                base_url=base_url,
+                min_interval_seconds=min_interval_seconds,
+            )
+        self._client = client
+        self.model_name = client.model_name
+        self._max_output_tokens = max_output_tokens
+        self._max_chars = max_chars
+
+    async def describe_directory(
+        self,
+        *,
+        path: str,
+        files: Sequence[tuple[str, str]],
+        directories: Sequence[tuple[str, str]],
+    ) -> Description:
+        completion = await self._client.complete(
+            DIRECTORY_PROMPT.format(
+                path=path or "(project root)",
+                files=_file_blocks(files),
+                subdirectories=_bullet_list(directories),
+                max_chars=self._max_chars,
+            ),
+            max_tokens=self._max_output_tokens,
+        )
+        return Description(
+            text=clip_description(completion.text, self._max_chars), model=completion.model
         )
 
 
 def build_describer(settings: Settings) -> Describer:
     """Pick the describer for the current configuration."""
-    if settings.resolved_summarizer == "gemini":
+    provider = settings.resolved_summarizer
+    if provider == "groq":
+        logger.info("Using the Groq describer (%s)", settings.groq_model)
+        return GroqDescriber(
+            api_key=settings.groq_api_key,
+            model=settings.groq_model,
+            fallback_models=settings.groq_models[1:],
+            base_url=settings.groq_base_url,
+            max_chars=settings.description_max_chars,
+            min_interval_seconds=settings.llm_min_interval_seconds,
+        )
+    if provider == "gemini":
         return GeminiDescriber(
             api_key=settings.gemini_api_key,
             model=settings.gemini_model,
             thinking_budget=settings.gemini_thinking_budget,
+            fallback_models=settings.gemini_models[1:],
+            max_chars=settings.description_max_chars,
+            min_interval_seconds=settings.llm_min_interval_seconds,
         )
-    logger.info("Using the offline mock describer (no GEMINI_API_KEY configured)")
-    return MockDescriber()
+    logger.info("Using the offline mock describer (no model configured)")
+    return MockDescriber(max_chars=settings.description_max_chars)

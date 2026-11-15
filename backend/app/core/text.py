@@ -287,6 +287,24 @@ def score_document_texts(
     return min(1.0, round(score, 4))
 
 
+def clip_description(text: str, limit: int = 300) -> str:
+    """Collapse whitespace and cut a folder description to a hard character limit.
+
+    The cut lands on the last word boundary that fits and the ellipsis counts towards the
+    limit, so the result is always ``len(result) <= limit``.
+    """
+    collapsed = " ".join((text or "").split())
+    if limit <= 0:
+        return ""
+    if len(collapsed) <= limit:
+        return collapsed
+    cut = collapsed[: max(1, limit - 1)].rstrip()
+    boundary = cut.rfind(" ")
+    if boundary >= limit // 2:
+        cut = cut[:boundary]
+    return (cut.rstrip(" ,;:-–—") + "…")[:limit]
+
+
 def excerpt(text: str, needles: Iterable[str], width: int = 200) -> str:
     """A readable snippet of ``text`` around the first place a query term appears."""
     collapsed = " ".join(strip_markdown(text).split())

@@ -22,7 +22,7 @@ the error red.
 npm install          # first time only
 npm run dev          # Vite dev server + Electron with HMR
 npm run typecheck    # tsc --noEmit for the main/preload project and the renderer project
-npm test             # vitest: the graph rules and the formatters
+npm test             # vitest: the graph rules, the formatters and the payload adapters
 npm run build        # production bundles into out/
 npm run dist:win     # NSIS installer (must run on Windows)
 npm run dist:mac     # DMG, arm64 + x64 (must run on macOS)
@@ -55,7 +55,9 @@ That is deliberate:
 - the bearer token (when one is used) never reaches page JavaScript.
 
 `src/shared/types.ts` mirrors the pydantic schemas field for field. If a backend model
-changes, that file changes with it and `npm run typecheck` finds the fallout.
+changes, that file changes with it and `npm run typecheck` finds the fallout *inside the
+client*; the payload shapes themselves are pinned by `lib/payloads.test.ts`, whose fixtures
+are the examples in [`../backend/README.md`](../backend/README.md).
 
 Configuration lives in `config.json` in Electron's userData directory (set from Settings):
 backend address, an optional dev user id, an optional bearer token. Nothing secret is kept
@@ -67,17 +69,22 @@ in the repository.
    and **New project**.
 2. **New project** - name the project, pick a folder, review exactly what will be sent
    (markdown count, size, skipped files, limit warnings), then follow the background job:
-   `queued -> summarising -> persisting -> ok / partial / failed`, polled every 1.5 s.
+   `queued -> summarising -> persisting -> ok / partial / failed` (the middle step is shown as
+   *Describing*, because folders are described rather than files), polled every 1.5 s. A
+   `partial` job still opens the project and reports the folders that could not be described in
+   a toast.
 3. **Project** - the graph on a quiet dotted canvas, with a right-hand inspector. The top
    bar carries the project name, the search field, **Tidy layout** and **Add document**.
-4. **Add document** - the two-step wizard the backend expects: choose a file, read the
-   ranked suggestions (score, reason, counts, duplicate-content and name-clash warnings),
-   choose *this folder* or *a new folder under it*, then place it. A `409` offers the free
-   names the API returned as one-click chips; a `410` says the suggestion expired and
-   starts again.
-5. **Search** - runs Graph AI Search and lists ranked hits with score and reason; matching
-   cards are outlined on the canvas, the folders the walk opened are marked, and everything
-   else dims. Clicking a hit expands the ancestors it needs and centres the file.
+4. **Add document** - the two-step wizard the backend expects: choose a file, read its
+   model-free preview and the locally ranked suggestions (score, reason, matched terms,
+   counts, duplicate-content and name-clash warnings), choose *this folder* or *a new folder
+   under it*, then place it. Scoring calls no model; only the placement does, once. A `409`
+   offers the free names the API returned as one-click chips; a `410` says the suggestion
+   expired and starts again.
+5. **Search** - runs Graph AI Search and lists ranked hits with score, the matched terms and
+   an excerpt cut from the document itself; matching cards are outlined on the canvas and
+   everything else dims. Clicking a hit expands the ancestors it needs and centres the file.
+   The walk is local and read-only, so a search makes no model calls.
 
 ## The tree
 

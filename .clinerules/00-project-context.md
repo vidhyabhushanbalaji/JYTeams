@@ -11,7 +11,7 @@ An Electron desktop app that makes Microsoft Teams project information easier to
 | Backend | Python 3.14 + FastAPI — `backend/` |
 | Auth | Supabase Auth (bearer token); `AUTH_MODE=dev` trusts `X-Dev-User-Id` locally |
 | Data | Supabase **Postgres** (the tree, via `ltree`) + Supabase **Storage** (markdown files) |
-| LLM | Gemini via `google-genai` — **directory descriptions only** (creation, and the refresh after a placement). Search and placement ranking are local (`app/core/text.py`) and make no model call |
+| LLM | Groq (OpenAI-compatible, via `httpx`) or Gemini (`google-genai`) — **directory descriptions only** (creation, and the refresh after a placement). `SUMMARIZER=auto` prefers Groq, then Gemini, then a local mock. Search and placement ranking are local (`app/core/text.py`) and make no model call |
 | Graph DB | **None.** Neo4j was retired; Graph AI Search walks the `ltree` hierarchy instead |
 
 ## Layout
@@ -105,6 +105,9 @@ API docs: <http://localhost:8000/docs> · health: <http://localhost:8000/health>
 - Uploads are markdown (`.md`, `.markdown`, `.mdx`). Documents are never summarised: every
   `files` row is `summary_status='skipped'`, and a non-markdown upload is stored without its
   text reaching a prompt.
+- Folder descriptions are capped at `DESCRIPTION_MAX_CHARS` (300 characters, clipped after the
+  call as well as asked for in the prompt), and model calls start at least
+  `LLM_MIN_INTERVAL_SECONDS` (2 s) apart — retries and fallback models included.
 - Schema changes are SQL in `supabase/migrations/`, reviewed by both of us before they
   are applied to a shared project.
 - **Graph Add is designed and built** — read `backend/README.md` ("Graph Add endpoints")
@@ -114,6 +117,6 @@ API docs: <http://localhost:8000/docs> · health: <http://localhost:8000/health>
 - **Graph AI Search is designed and built** — the local walk, the weak-match sweep, the
   optional `max_directories` valve and the shared scoring weights are agreed. Read
   `backend/README.md` ("Graph AI Search endpoints") before changing its routes or `search.py`,
-  and keep it read-only and model-free: it must never write to a project and never call
-  Gemini.
+  and keep it read-only and model-free: it must never write to a project and never call a
+  model.
 

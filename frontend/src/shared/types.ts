@@ -87,25 +87,28 @@ export interface AddSuggestion {
   child_directory_count: number
   is_leaf: boolean
   reason: string
+  /** The document's own words that the folder matched, so the score is explainable. */
+  matched_terms: string[]
   proposed_new_directory_names: string[]
   name_available: boolean
   suggested_file_names: string[]
   identical_content_at: string[]
 }
 
-export interface TraversalInfo {
-  expanded: number
-  visited: number
-  degraded: boolean
-  budget_exhausted: boolean
-  model: string
+/** What the local folder scan cost (no model was called). */
+export interface ScanInfo {
+  folders_scored: number
+  threshold: number
+  scorer_version: string
 }
 
+/** The uploaded document as the client last saw it. */
 export interface DocumentBrief {
   name: string
   size_bytes: number
   content_sha256: string
-  summary: string
+  /** First ~200 characters of the document — no model wrote it, so it is always faithful. */
+  preview: string
 }
 
 export interface SuggestionAccepted {
@@ -115,7 +118,7 @@ export interface SuggestionAccepted {
   expires_at: string | null
   file: DocumentBrief
   suggestions: AddSuggestion[]
-  traversal: TraversalInfo
+  scan: ScanInfo
 }
 
 export type PlacementMode = 'direct' | 'new_directory'
@@ -128,14 +131,27 @@ export interface PlacementInput {
   file_name?: string | null
 }
 
+/** The file row a placement wrote (documents are stored, never summarised). */
+export interface PlacedFile {
+  id: string
+  name: string
+  path: string
+  directory_id: string
+  size_bytes: number
+  summary_status: string
+  storage_bucket: string | null
+  storage_path: string | null
+}
+
 export interface PlacementResult {
   project_id: string
   request_id: string
   directory_id: string
   directory_path: string
   created_directory: boolean
+  /** Folders whose description was refreshed (one model call covered all of them). */
   refreshed_directories: number
-  file: ProjectFile
+  file: PlacedFile
 }
 
 export interface SearchHit {
@@ -144,25 +160,44 @@ export interface SearchHit {
   path: string
   directory_id: string
   directory_path: string
-  summary: string
   score: number
-  reason: string
+  /** Query terms found in the document (or its name), so the score is explainable. */
+  matched_terms: string[]
+  /** A snippet around the first match — no model summarised it, so it is always faithful. */
+  excerpt: string
+}
+
+/** A folder worth browsing, judged from its stored description. */
+export interface DirectoryHit {
+  directory_id: string
+  path: string
+  name: string
+  depth: number
+  score: number
+  matched_terms: string[]
 }
 
 export interface SearchTraversal {
   directories_visited: number
   directories_opened: number
   documents_considered: number
+  /** Documents whose stored text was actually read (the expensive part of a search). */
+  files_read: number
   fallback_used: boolean
   degraded: boolean
   budget_exhausted: boolean
-  model: string
+  /** Identifies the local scorer that produced the ordering. */
+  scorer_version: string
+  duration_ms: number
 }
 
 export interface SearchResults {
   query: string
+  context: string
   project_id: string
   results: SearchHit[]
+  /** Folders whose descriptions matched, so the UI can offer "browse this instead". */
+  directories: DirectoryHit[]
   opened_directories: string[]
   traversal: SearchTraversal
 }
