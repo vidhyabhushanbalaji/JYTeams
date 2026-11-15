@@ -1,6 +1,9 @@
 /**
  * Share a project with another member, by name. Only the project's owner may add or remove,
  * which the backend enforces — the dialog just mirrors it.
+ *
+ * Opened from two places: the project screen's bar (owner sees the Share button) and the header
+ * of an open ticket on the tickets screen.
  */
 
 import { useEffect, useState } from 'react'

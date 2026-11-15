@@ -108,6 +108,8 @@ export default function App() {
           <ProjectScreen
             key={view.projectId}
             projectId={view.projectId}
+            member={member}
+            members={identity.members}
             ticketFocus={view.focus}
             onClearTicketFocus={() =>
               setView({ kind: 'project', projectId: view.projectId, focus: null })

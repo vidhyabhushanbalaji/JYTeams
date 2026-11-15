@@ -239,6 +239,36 @@ body[data-platform='mac'] .topbar {
   gap: 8px;
 }
 
+/* The project's identity: whose project this is, your role, and (for the owner) sharing. */
+.project-bar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--paper);
+}
+
+.project-bar__name {
+  overflow: hidden;
+  max-width: 420px;
+  font-size: var(--text-body);
+  font-weight: 600;
+  letter-spacing: -0.006em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-bar__grow {
+  flex: 1;
+}
+
+.project-bar__hint {
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
 /* ----------------------------------------------------------------- buttons */
 
 .btn {

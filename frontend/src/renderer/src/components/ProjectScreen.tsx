@@ -1,28 +1,45 @@
+/**
+ * One project's tree: breadcrumbs and search in the top bar, the graph in the middle, the
+ * inspector on the right.
+ *
+ * The bar under the top bar names the project, shows the caller's role, and gives the owner the
+ * Share dialog — the same dialog the tickets screen opens, so access is managed where the
+ * project is, not only from inside a ticket.
+ */
+
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 
-import type { FileSaved, PlacementResult, SearchHit } from '@shared/types'
+import type { FileSaved, Member, PlacementResult, Project, SearchHit } from '@shared/types'
 
 import { describeError } from '../lib/errors'
 import { fileNodeId } from '../lib/focusGraph'
 import { focusForFile, type TicketFocus } from '../lib/ticketFocus'
 import { stepIndex } from '../lib/tickets'
 import { useFocusGraph } from '../state/useFocusGraph'
+import { useProjects } from '../state/useProjects'
 import { useSearch } from '../state/useSearch'
 import { AddDocumentFlow } from './AddDocumentFlow'
 import { DocumentSheet } from './DocumentSheet'
 import { GraphCanvas } from './GraphCanvas'
 import { Inspector } from './Inspector'
 import { SearchResults } from './SearchResults'
+import { ShareProjectDialog } from './ShareProjectDialog'
 import { Spinner } from './primitives'
 
 export function ProjectScreen({
   projectId,
+  member,
+  members,
   ticketFocus,
   onClearTicketFocus,
   onOpenSettings,
   notify
 }: {
   projectId: string
+  /** The signed-in member: the share dialog compares them with the project's role. */
+  member: Member
+  /** Every name that has signed in — the share dialog offers the ones not yet on the project. */
+  members: Member[]
   /** The files a ticket asked the graph to highlight, and which one to open first. */
   ticketFocus: TicketFocus | null
   onClearTicketFocus: () => void
@@ -31,12 +48,19 @@ export function ProjectScreen({
 }) {
   const graph = useFocusGraph(projectId)
   const search = useSearch(projectId)
+  const { projects } = useProjects()
   const [side, setSide] = useState<'inspector' | 'search'>('inspector')
   const [query, setQuery] = useState('')
   const [adding, setAdding] = useState(false)
+  const [shareOpen, setShareOpen] = useState(false)
   const [openFileId, setOpenFileId] = useState<string | null>(null)
   const [matchIndex, setMatchIndex] = useState(0)
   const appliedFocus = useRef<string | null>(null)
+
+  const project = useMemo<Project | null>(
+    () => projects.find((item) => item.id === projectId) ?? null,
+    [projects, projectId]
+  )
 
   const view = graph.view
 
@@ -179,6 +203,30 @@ export function ProjectScreen({
           </button>
         </div>
       </header>
+
+      {project ? (
+        <div className="project-bar">
+          <span className="project-bar__name" title={project.name}>
+            {project.name}
+          </span>
+          <span className={`badge${project.role === 'owner' ? '' : ' badge--ink'}`}>
+            {project.role === 'owner' ? 'owner' : 'shared with you'}
+          </span>
+          <div className="project-bar__grow" />
+          {project.role === 'owner' ? (
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              onClick={() => setShareOpen(true)}
+              title="Choose who can open this project"
+            >
+              Share
+            </button>
+          ) : (
+            <span className="project-bar__hint">Only the owner can change who has access.</span>
+          )}
+        </div>
+      ) : null}
 
       <div className="workspace">
         <div className="workspace__canvas">
@@ -323,6 +371,14 @@ export function ProjectScreen({
         projectId={projectId}
         onClose={() => setAdding(false)}
         onPlaced={(result) => void placed(result)}
+      />
+
+      <ShareProjectDialog
+        open={shareOpen}
+        project={project}
+        members={members}
+        currentMemberId={member.id}
+        onClose={() => setShareOpen(false)}
       />
     </>
   )
