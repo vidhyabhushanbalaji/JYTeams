@@ -1,8 +1,9 @@
-"""Folder describers: Groq or Gemini for real use, a deterministic mock for tests.
+"""Folder describers: Gemini for real use, a deterministic mock for tests.
 
-Graph Add no longer summarises the document it places. After a placement it asks for the updated
-description of every affected folder — the new folder (if one was created), the folder it landed
-in, and its ancestors — in a single call, then applies whatever comes back.
+Gemini (``gemini-2.5-flash-lite``) is the only provider. Graph Add no longer summarises the
+document it places. After a placement it asks for the updated description of every affected
+folder — the new folder (if one was created), the folder it landed in, and its ancestors — in a
+single call, then applies whatever comes back.
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from app.core.config import Settings
-from app.core.groq import DEFAULT_BASE_URL, GroqClient
 from app.core.pacing import RequestPacer
 from app.core.text import clip_description
 from app.graph_add import prompts
@@ -173,65 +173,10 @@ class MockFolderDescriber:
         }
 
 
-class GroqFolderDescriber:
-    """Groq implementation (OpenAI-compatible chat completions).
-
-    ``GroqClient`` owns retries, rate limits and the model fallback chain; the JSON contract is
-    unchanged, so a placement behaves the same whichever provider wrote the descriptions.
-    """
-
-    def __init__(
-        self,
-        *,
-        api_key: str,
-        model: str,
-        fallback_models: Sequence[str] = (),
-        base_url: str = DEFAULT_BASE_URL,
-        max_output_tokens: int = 1024,
-        max_chars: int = 300,
-        min_interval_seconds: float = 0.0,
-        client: GroqClient | None = None,
-    ) -> None:
-        if client is None:
-            client = GroqClient(
-                api_key=api_key,
-                model=model,
-                fallback_models=fallback_models,
-                base_url=base_url,
-                min_interval_seconds=min_interval_seconds,
-            )
-        self._client = client
-        self.model_name = client.model_name
-        self._max_output_tokens = max_output_tokens
-        self._max_chars = max_chars
-
-    async def update_descriptions(
-        self, *, document: DocumentContext, targets: Sequence[TargetContext]
-    ) -> dict[str, str]:
-        if not targets:
-            return {}
-        completion = await self._client.complete(
-            prompts.refresh_prompt(document=document, targets=targets, max_chars=self._max_chars),
-            max_tokens=self._max_output_tokens,
-            json_mode=True,
-        )
-        return _updates_from(completion.text, targets, max_chars=self._max_chars)
-
-
 def build_describer(settings: Settings) -> FolderDescriber:
-    """Pick the describer for the current configuration (same switch as the other sections)."""
-    provider = settings.resolved_summarizer
-    if provider == "groq":
-        logger.info("Using the Groq folder describer (%s)", settings.groq_model)
-        return GroqFolderDescriber(
-            api_key=settings.groq_api_key,
-            model=settings.groq_model,
-            fallback_models=settings.groq_models[1:],
-            base_url=settings.groq_base_url,
-            max_chars=settings.description_max_chars,
-            min_interval_seconds=settings.llm_min_interval_seconds,
-        )
-    if provider == "gemini":
+    """Pick the describer for the current configuration (Gemini, or the offline mock)."""
+    if settings.resolved_summarizer == "gemini":
+        logger.info("Using the Gemini folder describer (%s)", settings.gemini_model)
         return GeminiFolderDescriber(
             api_key=settings.gemini_api_key,
             model=settings.gemini_model,

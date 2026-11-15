@@ -143,13 +143,7 @@ def print_suggestions(payload: Row) -> None:
 def run(args: argparse.Namespace, document: Path, report: Report, payloads: dict[str, Any]) -> int:
     settings = get_settings()
     provider = settings.resolved_summarizer
-    model = (
-        settings.groq_model
-        if provider == "groq"
-        else settings.gemini_model
-        if provider == "gemini"
-        else "offline mock"
-    )
+    model = settings.gemini_model if provider == "gemini" else "offline mock"
 
     print(f"Graph Add — live check against project {args.project_id}")
     print(f"  api          : in-process ({settings.supabase_url or 'SUPABASE_URL missing'})")

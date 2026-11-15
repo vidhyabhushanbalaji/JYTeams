@@ -1,8 +1,8 @@
 """Keep model requests to a steady cadence instead of firing them back to back.
 
-Free tiers rate-limit aggressively (Groq's free plan is 30 RPM / 8K TPM), and a burst of
-folder descriptions can spend a whole minute's budget in a second. One pacer is shared by every
-model call a client makes, so retries and fallback models are paced too.
+Free tiers rate-limit aggressively, and a burst of folder descriptions can spend a whole
+minute's budget in a second. One pacer is shared by every model call a client makes, so retries
+and fallback models are paced too.
 
 The clock and sleep are injectable so tests can assert the spacing without waiting.
 """

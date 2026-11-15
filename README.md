@@ -4,8 +4,9 @@ An Electron desktop app that makes Microsoft Teams **project information easier 
 reach**. By Charlie and Bhushan.
 
 Stack: Electron (frontend, later) · Python 3.14 + FastAPI (backend) · Supabase (auth,
-Postgres tree, file storage) · Groq or Gemini (folder descriptions only). Neo4j was retired —
-the project tree is a hierarchy, and `ltree` in Postgres covers it.
+Postgres tree, file storage) · Gemini `gemini-2.5-flash-lite` (folder descriptions only, the
+only model provider). Neo4j was retired — the project tree is a hierarchy, and `ltree` in
+Postgres covers it.
 
 ## Status
 
@@ -30,7 +31,7 @@ question, matching locally against folder descriptions and document text. Detail
 .\.venv\Scripts\python.exe -m pip install -r backend\requirements-dev.txt
 
 # 2. configuration
-Copy-Item backend\.env.example backend\.env   # then fill in Supabase / Groq
+Copy-Item backend\.env.example backend\.env   # then fill in Supabase / Gemini
 
 # 3. database schema — paste supabase\migrations\0001_graph_creation.sql and
 #    supabase\migrations\0002_graph_add.sql into the Supabase SQL editor (or

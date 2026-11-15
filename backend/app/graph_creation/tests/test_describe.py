@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Any
 
@@ -10,7 +11,6 @@ import pytest
 from app.graph_creation import describe
 from app.graph_creation.describe import (
     GeminiDescriber,
-    GroqDescriber,
     MockDescriber,
     trim_for_prompt,
 )
@@ -48,9 +48,10 @@ class _ScriptedModels:
 def _describer(
     models: _ScriptedModels,
     *,
-    model: str = "gemini-3.5-flash-lite",
+    model: str = "gemini-2.5-flash-lite",
     thinking_budget: int | None = 0,
     max_output_tokens: int = 1024,
+    fallback_models: Sequence[str] | None = None,
 ) -> GeminiDescriber:
     """Build a describer wired to a scripted fake client."""
     client = SimpleNamespace(aio=SimpleNamespace(models=models))
@@ -59,6 +60,7 @@ def _describer(
         model=model,
         max_output_tokens=max_output_tokens,
         thinking_budget=thinking_budget,
+        fallback_models=fallback_models,
         client=client,
     )
 
@@ -71,7 +73,7 @@ async def _describe(describer: GeminiDescriber, name: str = "a.md", text: str = 
 
 def test_requires_an_api_key_when_building_its_own_client() -> None:
     with pytest.raises(ValueError):
-        GeminiDescriber(api_key="", model="gemini-3.5-flash-lite")
+        GeminiDescriber(api_key="", model="gemini-2.5-flash-lite")
 
 
 async def test_zero_thinking_budget_sends_no_thinking_config() -> None:
@@ -114,11 +116,13 @@ async def test_quota_errors_skip_to_the_next_model_without_retrying() -> None:
     quota = RuntimeError(
         "429 RESOURCE_EXHAUSTED. You exceeded your current quota, please check your plan."
     )
-    models = _ScriptedModels({"m": [quota], "gemini-3.7-flash": [_Response("Fallback.")]})
-    describer = _describer(models, model="m", thinking_budget=0)
+    models = _ScriptedModels({"m": [quota], "gemini-2.5-flash": [_Response("Fallback.")]})
+    describer = _describer(
+        models, model="m", thinking_budget=0, fallback_models=("gemini-2.5-flash",)
+    )
 
     assert await _describe(describer) == "Fallback."
-    assert [model for model, _ in models.calls] == ["m", "gemini-3.7-flash"]
+    assert [model for model, _ in models.calls] == ["m", "gemini-2.5-flash"]
 
 
 async def test_overload_is_retried_on_the_same_model(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -150,16 +154,31 @@ async def test_every_model_failing_reports_the_last_error() -> None:
     models = _ScriptedModels(
         {
             "m": [failure],
-            "gemini-3.7-flash": [failure],
-            "gemini-3.5-flash": [failure],
-            "gemini-3.8-flash": [failure],
+            "gemini-2.5-flash": [failure],
+            "gemini-2.5-pro": [failure],
         }
     )
-    describer = _describer(models, model="m", thinking_budget=0)
+    describer = _describer(
+        models,
+        model="m",
+        thinking_budget=0,
+        fallback_models=("gemini-2.5-flash", "gemini-2.5-pro"),
+    )
 
     with pytest.raises(RuntimeError, match="failed for every model"):
         await _describe(describer)
-    assert len(models.calls) == 4
+    assert len(models.calls) == 3
+
+
+async def test_without_fallbacks_only_the_configured_model_is_called() -> None:
+    """The default chain is empty, so a failure surfaces instead of another model answering."""
+    failure = RuntimeError("429 RESOURCE_EXHAUSTED. You exceeded your current quota.")
+    models = _ScriptedModels({"gemini-2.5-flash-lite": [failure]})
+    describer = _describer(models)
+
+    with pytest.raises(RuntimeError, match="failed for every model"):
+        await _describe(describer)
+    assert models.calls == [("gemini-2.5-flash-lite", False)]
 
 
 async def test_bad_api_key_fails_immediately() -> None:
@@ -219,36 +238,3 @@ async def test_the_mock_describer_names_the_files_and_their_headings() -> None:
     assert "docs holds 2 file(s) and 1 subfolder(s)." in description
     assert "Alpha" in description and "Beta" in description
     assert "Subfolders: api." in description
-
-
-class _GroqStub:
-    """Records the prompt and returns a fixed answer, like ``GroqClient.complete``."""
-
-    def __init__(self, text: str = "A guide.", model: str = "openai/gpt-oss-120b") -> None:
-        self.model_name = model
-        self.text = text
-        self.prompts: list[str] = []
-
-    async def complete(self, prompt: str, *, max_tokens: int = 1024, json_mode: bool = False):
-        from app.core.groq import Completion
-
-        self.prompts.append(prompt)
-        return Completion(text=self.text, model=self.model_name)
-
-
-async def test_the_groq_describer_uses_the_same_prompt_and_reports_the_model() -> None:
-    client = _GroqStub("Deployment and rollback material.")
-    describer = GroqDescriber(api_key="", model="openai/gpt-oss-120b", client=client)
-
-    result = await describer.describe_directory(
-        path="guides",
-        files=[("deployment.md", "Roll back with Helm.")],
-        directories=[("rollback", "Reverting a bad release.")],
-    )
-
-    assert result.text == "Deployment and rollback material."
-    assert result.model == "openai/gpt-oss-120b"
-    prompt = client.prompts[0]
-    assert "Folder: guides" in prompt
-    assert "Roll back with Helm." in prompt
-    assert "- rollback: Reverting a bad release." in prompt

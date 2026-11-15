@@ -26,7 +26,7 @@ def _isolate_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         monkeypatch.setenv(name, "")
     monkeypatch.setenv("AUTH_MODE", "dev")
     monkeypatch.setenv("DEV_USER_ID", "user-1")
-    monkeypatch.setenv("SUMMARIZER", "auto")
+    monkeypatch.setenv("SUMMARIZER", "gemini")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

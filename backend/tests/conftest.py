@@ -1,6 +1,6 @@
 """Shared pytest fixtures.
 
-Tests are hermetic: the Supabase/Groq/Gemini settings are forced empty and auth runs in dev
+Tests are hermetic: the Supabase/Gemini settings are forced empty and auth runs in dev
 mode, so the suite never reaches a real service even when a populated ``backend/.env``
 exists.
 """
@@ -24,13 +24,11 @@ def _isolate_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "SUPABASE_ANON_KEY",
         "SUPABASE_SERVICE_ROLE_KEY",
         "GEMINI_API_KEY",
-        "GROQ_API_KEY",
-        "GROK_API_KEY",
         "CORS_ORIGINS",
     ):
         monkeypatch.setenv(name, "")
     monkeypatch.setenv("AUTH_MODE", "dev")
-    monkeypatch.setenv("SUMMARIZER", "auto")
+    monkeypatch.setenv("SUMMARIZER", "gemini")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

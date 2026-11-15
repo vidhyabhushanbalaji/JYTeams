@@ -1,7 +1,8 @@
 # JYTeams backend
 
 FastAPI service for the JYTeams desktop app. Python 3.14, **Supabase** for auth, Postgres
-(the project tree) and file storage, and **Groq or Gemini** for folder descriptions.
+(the project tree) and file storage, and **Gemini** (`gemini-2.5-flash-lite`) for folder
+descriptions.
 
 ## Setup
 
@@ -10,7 +11,7 @@ Dependencies live in the repo-root virtualenv (`../.venv`, already created with 
 
 ```powershell
 ..\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-Copy-Item .env.example .env    # then fill in the Supabase / Groq values
+Copy-Item .env.example .env    # then fill in the Supabase / Gemini values
 ```
 
 Then prepare Supabase:
@@ -322,12 +323,12 @@ folder, its ancestors and the project. `--directory <path|id>` overrides the sug
 resolves a clash, and `--json` dumps every payload. Exit codes: `0` placed, `1` a check
 failed, `2` the name is taken.
 
-> If a provider answers `429`, that model's quota is spent or it is briefly throttled. The
-> client waits for `retry-after` when Groq sends one and then moves to the configured fallback
-> model. `description_model` on each folder row names the model that actually produced its text.
-> For Gemini specifically, `GEMINI_MODEL=gemini-3.5-flash-lite` (a process-only override) has the
-> most free quota; the `GEMINI_FALLBACK_MODELS` default starts with the lite models for the same
-> reason.
+> A `429` means the model's quota is spent or it is briefly throttled. The Gemini describer
+> retries an overload on the same model and, if `GEMINI_FALLBACK_MODELS` is configured, moves on
+> to the next model. The chain is **empty by default**, so every description comes from
+> `GEMINI_MODEL` (`gemini-2.5-flash-lite`) and a failure surfaces instead of another model
+> quietly writing the text. `description_model` on each folder row names the model that actually
+> produced its text.
 
 ## Try it locally (upload a directory or a .zip)
 
@@ -356,8 +357,9 @@ Options: `--url`, `--mode new|add`, `--name`, `--project-id`, `--token` (Supabas
 bearer token; otherwise the `X-Dev-User-Id` header is sent), `--depth`, `--timeout`,
 `--interval`, `--json`, `--full`.
 
-`--dry-run` uses the offline mock describer; a live run uses whichever describer
-`SUMMARIZER` resolves to (Groq when `GROQ_API_KEY` is set, otherwise Gemini, otherwise mock).
+`--dry-run` uses the offline mock describer; a live run uses the Gemini describer
+(`GEMINI_MODEL`, `gemini-2.5-flash-lite`) unless `SUMMARIZER=mock` or no `GEMINI_API_KEY` is
+configured, in which case it is the mock too.
 Either way the tree structure - empty-directory pruning, natural ordering, `ltree` paths - is
 identical to what the API stores.
 
@@ -379,8 +381,8 @@ identical to what the API stores.
    jumping in tens of files. Every description is capped at `DESCRIPTION_MAX_CHARS` (300): the
    prompt asks for that length and the reply is clipped to it, at a word boundary. Model calls
    start at least `LLM_MIN_INTERVAL_SECONDS` (2 s) apart, including retries and fallback models.
-   `SUMMARIZER=auto` prefers Groq when `GROQ_API_KEY` is set, then
-   Gemini when `GEMINI_API_KEY` is set, otherwise a deterministic offline mock — the pipeline
+   Gemini (`gemini-2.5-flash-lite`) is the only provider; with no `GEMINI_API_KEY` (or
+   `SUMMARIZER=mock`) a deterministic offline mock writes the descriptions, so the pipeline
    runs (and tests pass) with no key and no network.
 4. **Persist** (`repository.py`, `storage.py`) — blobs go to Storage under
    `{project_id}/{sha256}.md` (content-addressed: identical content is stored once, but
@@ -426,7 +428,7 @@ app/
 │  ├─ tree.py         # validation, pruning, ordering, ltree paths
 │  ├─ ingest.py       # multipart / zip parsing and limits
 │  ├─ extract.py      # markdown → prompt text
-│  ├─ describe.py     # directory descriptions (Groq/Gemini + mock)
+│  ├─ describe.py     # directory descriptions (Gemini + mock)
 │  ├─ storage.py      # Supabase Storage, content-addressed keys
 │  ├─ repository.py   # PostgREST access (protocol + Supabase implementation)
 │  └─ tests/
@@ -435,7 +437,7 @@ app/
 │  ├─ service.py      # orchestration, conflicts, one-call description refresh
 │  ├─ navigate.py     # local folder ranking (no model call)
 │  ├─ scoring.py      # the document reduced to a compact query
-│  ├─ describer.py    # batched description refresh (Groq/Gemini + mock)
+│  ├─ describer.py    # batched description refresh (Gemini + mock)
 │  ├─ prompts.py      # the single refresh prompt
 │  ├─ labels.py       # folder + file naming, ltree labels, rename suggestions
 │  ├─ extract.py      # markdown → prompt text
@@ -462,11 +464,10 @@ All settings and defaults live in `app/core/config.py`; env var names are in
 | `AUTH_MODE`, `DEV_USER_ID` | `dev` trusts `X-Dev-User-Id`; `supabase` verifies the bearer token |
 | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` | Service role bypasses RLS — server-side only |
 | `STORAGE_BUCKET` | Bucket for uploaded markdown (default `project-files`) |
-| `GROQ_API_KEY`, `GROQ_MODEL`, `GROQ_FALLBACK_MODELS`, `GROQ_BASE_URL` | Preferred describer. OpenAI-compatible chat completions through `httpx` (no SDK). `GROK_API_KEY` is accepted as an alias. Default model `openai/gpt-oss-120b`, fallback `openai/gpt-oss-20b`; free tier is 30 RPM / 8K TPM / 1K RPD, and `retry-after` is honoured |
-| `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_THINKING_BUDGET`, `GEMINI_FALLBACK_MODELS` | Alternative describer. `gemini-3.5-flash-lite` has the most free-tier quota; the fallback default starts with the lite models. Use a positive thinking budget (e.g. `512`) - the lite models reject `0` with 400 |
-| `SUMMARIZER`, `SUMMARY_MAX_INPUT_CHARS`, `SUMMARY_CONCURRENCY` | `auto` / `groq` / `gemini` / `mock`; the character cap when a document is read for a prompt; how many folder descriptions run at once (4 by default, 1-2 on a tight TPM budget) |
+| `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_THINKING_BUDGET`, `GEMINI_FALLBACK_MODELS` | The only describer provider (`google-genai`). Default model `gemini-2.5-flash-lite`. Fallbacks are empty by default, so every description comes from that model. `GEMINI_THINKING_BUDGET=0` (or blank) sends no thinking config, which is what 2.5 Flash-Lite wants |
+| `SUMMARIZER`, `SUMMARY_MAX_INPUT_CHARS`, `SUMMARY_CONCURRENCY` | `gemini` / `mock`; the offline mock is used when no key is configured (and by the tests); the character cap when a document is read for a prompt; how many folder descriptions run at once (4 by default) |
 | `DESCRIPTION_FILE_HEAD_CHARS`, `DESCRIPTION_MAX_INPUT_CHARS`, `DESCRIPTION_MAX_CHARS` | How much of each file (1500) and of one folder (24000) reaches a description prompt, and the hard ceiling (300 characters) for the description that comes back |
-| `LLM_MIN_INTERVAL_SECONDS` | Minimum gap between the starts of model calls (2 s). Retries and fallback models are paced too, so a free tier is not hammered |
+| `LLM_MIN_INTERVAL_SECONDS` | Minimum gap between the starts of model calls (2 s). Retries and fallback models are paced too |
 | `SCORING_FOLDER_THRESHOLD` | Share of a query a folder description must cover before a **search** opens that branch (0.25) |
 | `SEARCH_MAX_FILES_READ`, `SEARCH_MAX_DOCUMENT_CHARS`, `BLOB_CACHE_ENTRIES` | Search's read budget (200 documents), per-document cap (200k characters) and digest cache size (256) |
 | `MAX_UPLOAD_FILES`, `MAX_UPLOAD_BYTES`, `MAX_FILE_BYTES`, `MAX_DIRECTORY_DEPTH` | Upload limits |

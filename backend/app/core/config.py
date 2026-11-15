@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # backend/app/core/config.py -> parents[2] == backend/
@@ -60,36 +60,24 @@ class Settings(BaseSettings):
     auth_mode: Literal["dev", "supabase"] = "dev"
     dev_user_id: str = DEFAULT_DEV_USER_ID
 
-    # Gemini (google-genai). Used by the "gemini" describer.
+    # Gemini (google-genai) is the only model provider: folder descriptions are the only thing
+    # it writes (Graph Creation, and the refresh after a placement).
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-3.6-flash"
-    #: Comma separated models tried, in order, when the primary one is unavailable or spent.
-    #: The lite models are first because they carry the most free-tier quota.
-    gemini_fallback_models: str = (
-        "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3.7-flash,gemini-3.5-flash"
-    )
-    # Positive values cap thinking (faster, cheaper summaries). 0, blank or negative omits
-    # the thinking config entirely - which the *-flash-lite models require, because they
-    # reject a budget of 0 with 400 INVALID_ARGUMENT.
+    gemini_model: str = "gemini-2.5-flash-lite"
+    #: Comma separated models tried, in order, only when the primary one is unavailable.
+    #: Empty by default, so every description is written by ``gemini_model``.
+    gemini_fallback_models: str = ""
+    # Positive values cap thinking (faster, cheaper descriptions). 0, blank or negative omits
+    # the thinking config entirely, which is what Gemini 2.5 Flash-Lite wants.
     gemini_thinking_budget: int | None = 0
 
-    # Groq (OpenAI-compatible chat completions, called through httpx). Used by the "groq"
-    # describer. GROK_API_KEY is accepted as an alias because it is easy to mistype.
-    groq_api_key: str = Field(
-        default="",
-        validation_alias=AliasChoices("GROQ_API_KEY", "GROK_API_KEY"),
-    )
-    groq_model: str = "openai/gpt-oss-120b"
-    #: Comma separated models tried after ``groq_model`` (a model can be rate limited alone).
-    groq_fallback_models: str = "openai/gpt-oss-20b"
-    groq_base_url: str = "https://api.groq.com/openai/v1"
-
-    # Describers. "auto" prefers Groq, then Gemini, otherwise the offline mock.
-    summarizer: Literal["auto", "gemini", "groq", "mock"] = "auto"
+    # Describers. Gemini when a key is configured, otherwise the offline mock (tests and
+    # keyless local runs). There is no second provider.
+    summarizer: Literal["gemini", "mock"] = "gemini"
     summary_max_input_chars: int = 12_000
-    #: Folder descriptions written at once (creation). Groq's free tier (8K TPM) may prefer 1-2.
+    #: Folder descriptions written at once (creation); one model call per folder.
     summary_concurrency: int = Field(default=4, ge=1, le=16)
-    #: Minimum seconds between the starts of model calls (0 disables). Free tiers dislike bursts.
+    #: Minimum seconds between the starts of model calls (0 disables). Keeps bursts down.
     llm_min_interval_seconds: float = Field(default=2.0, ge=0, le=60)
 
     # Directory descriptions (Graph Creation, and the refresh after a placement). A folder's
@@ -133,18 +121,11 @@ class Settings(BaseSettings):
         return bool(self.supabase_url and self.supabase_service_role_key)
 
     @property
-    def resolved_summarizer(self) -> Literal["gemini", "groq", "mock"]:
-        """Which describer to use, resolving ``auto`` against the configured keys."""
-        if self.summarizer == "auto":
-            if self.groq_api_key:
-                return "groq"
-            return "gemini" if self.gemini_api_key else "mock"
-        return self.summarizer
-
-    @property
-    def groq_models(self) -> tuple[str, ...]:
-        """The Groq model followed by its fallbacks, deduplicated."""
-        return _model_chain(self.groq_model, self.groq_fallback_models)
+    def resolved_summarizer(self) -> Literal["gemini", "mock"]:
+        """The describer to use: Gemini when a key is configured, otherwise the mock."""
+        if self.summarizer == "mock":
+            return "mock"
+        return "gemini" if self.gemini_api_key else "mock"
 
     @property
     def gemini_models(self) -> tuple[str, ...]:

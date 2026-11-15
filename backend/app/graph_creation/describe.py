@@ -5,9 +5,10 @@ directly inside it (heads, capped) plus the descriptions of its child directorie
 described bottom-up, so the root ends up describing the whole project. That is one model call per
 directory instead of one per file plus one per directory.
 
-Three implementations exist - ``GroqDescriber`` (OpenAI-compatible, via ``app.core.groq``),
-``GeminiDescriber`` (real) and ``MockDescriber`` (deterministic, no network) - selected by
-``SUMMARIZER`` and the configured API keys.
+Two implementations exist - ``GeminiDescriber`` (real, through ``google-genai``) and
+``MockDescriber`` (deterministic, no network) - selected by ``SUMMARIZER`` and the configured
+API key. Gemini is the only provider: ``GEMINI_MODEL`` (``gemini-2.5-flash-lite``) writes every
+description.
 
 Because a description is now the only thing a local search can match a folder on, the prompt asks
 for the words a reader would search for (tool names, error codes, concepts) rather than a neutral
@@ -16,8 +17,8 @@ abstract.
 Three provider quirks are handled here, because each of them used to surface as "every
 description failed" instead of a readable error:
 
-* the ``*-flash-lite`` models reject ``thinking_budget=0`` with ``400 INVALID_ARGUMENT``,
-  so a rejected thinking config is retried once without it and remembered per model;
+* a thinking config the model rejects is retried once without it and remembered per model
+  (``GEMINI_THINKING_BUDGET=0`` already sends none, which is what 2.5 Flash-Lite wants);
 * a ``429`` quota error cannot be fixed by retrying the same model seconds later, while a
   ``503`` overload can - only an overload is retried on the same model;
 * thinking tokens are billed against ``max_output_tokens``, so the output budget must be
@@ -33,7 +34,6 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from app.core.config import Settings
-from app.core.groq import DEFAULT_BASE_URL, GroqClient
 from app.core.pacing import RequestPacer
 from app.core.text import clip_description
 
@@ -42,7 +42,9 @@ logger = logging.getLogger(__name__)
 _MAX_ATTEMPTS = 3
 _REQUEST_TIMEOUT_MS = 30_000
 _DEFAULT_MAX_OUTPUT_TOKENS = 1024
-_FALLBACK_MODELS = ("gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.8-flash")
+#: No fallback by default: every description is written by the configured model. Set
+#: GEMINI_FALLBACK_MODELS to opt into another model when the primary one is unavailable.
+_FALLBACK_MODELS: tuple[str, ...] = ()
 
 # Transient overload: another attempt on the same model is worth the wait.
 _OVERLOAD_MARKERS = (
@@ -348,74 +350,10 @@ class GeminiDescriber:
         )
 
 
-class GroqDescriber:
-    """Groq implementation (OpenAI-compatible chat completions).
-
-    ``GroqClient`` owns retries, rate limits and the model fallback chain; this class only
-    builds the same prompt the Gemini describer uses, so a project looks the same whichever
-    provider wrote it.
-    """
-
-    def __init__(
-        self,
-        *,
-        api_key: str,
-        model: str,
-        fallback_models: Sequence[str] = (),
-        base_url: str = DEFAULT_BASE_URL,
-        max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
-        max_chars: int = 300,
-        min_interval_seconds: float = 0.0,
-        client: GroqClient | None = None,
-    ) -> None:
-        if client is None:
-            client = GroqClient(
-                api_key=api_key,
-                model=model,
-                fallback_models=fallback_models,
-                base_url=base_url,
-                min_interval_seconds=min_interval_seconds,
-            )
-        self._client = client
-        self.model_name = client.model_name
-        self._max_output_tokens = max_output_tokens
-        self._max_chars = max_chars
-
-    async def describe_directory(
-        self,
-        *,
-        path: str,
-        files: Sequence[tuple[str, str]],
-        directories: Sequence[tuple[str, str]],
-    ) -> Description:
-        completion = await self._client.complete(
-            DIRECTORY_PROMPT.format(
-                path=path or "(project root)",
-                files=_file_blocks(files),
-                subdirectories=_bullet_list(directories),
-                max_chars=self._max_chars,
-            ),
-            max_tokens=self._max_output_tokens,
-        )
-        return Description(
-            text=clip_description(completion.text, self._max_chars), model=completion.model
-        )
-
-
 def build_describer(settings: Settings) -> Describer:
-    """Pick the describer for the current configuration."""
-    provider = settings.resolved_summarizer
-    if provider == "groq":
-        logger.info("Using the Groq describer (%s)", settings.groq_model)
-        return GroqDescriber(
-            api_key=settings.groq_api_key,
-            model=settings.groq_model,
-            fallback_models=settings.groq_models[1:],
-            base_url=settings.groq_base_url,
-            max_chars=settings.description_max_chars,
-            min_interval_seconds=settings.llm_min_interval_seconds,
-        )
-    if provider == "gemini":
+    """Pick the describer for the current configuration (Gemini, or the offline mock)."""
+    if settings.resolved_summarizer == "gemini":
+        logger.info("Using the Gemini describer (%s)", settings.gemini_model)
         return GeminiDescriber(
             api_key=settings.gemini_api_key,
             model=settings.gemini_model,

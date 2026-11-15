@@ -11,7 +11,6 @@ import pytest
 from app.graph_add.describer import (
     DocumentContext,
     GeminiFolderDescriber,
-    GroqFolderDescriber,
     MockFolderDescriber,
     TargetContext,
 )
@@ -139,33 +138,3 @@ async def test_the_mock_describes_every_target() -> None:
 
     assert set(updates) == {"guides", ""}
     assert "rollback.md" in updates["guides"]
-
-
-class _GroqStub:
-    """Records the call and returns a fixed reply, like ``GroqClient.complete``."""
-
-    def __init__(self, reply: str, model: str = "openai/gpt-oss-120b") -> None:
-        self.reply = reply
-        self.model_name = model
-        self.prompts: list[str] = []
-        self.json_modes: list[bool] = []
-
-    async def complete(self, prompt: str, *, max_tokens: int = 1024, json_mode: bool = False):
-        from app.core.groq import Completion
-
-        self.prompts.append(prompt)
-        self.json_modes.append(json_mode)
-        return Completion(text=self.reply, model=self.model_name)
-
-
-async def test_the_groq_describer_asks_for_json_and_parses_it() -> None:
-    payload = {"descriptions": [{"path": "guides", "description": "Deployment and rollback."}]}
-    stub = _GroqStub(json.dumps(payload))
-    describer = GroqFolderDescriber(api_key="", model="openai/gpt-oss-120b", client=stub)
-
-    updates = await describer.update_descriptions(document=DOCUMENT, targets=TARGETS)
-
-    assert updates == {"guides": "Deployment and rollback."}
-    assert stub.json_modes == [True]
-    assert "rollback.md" in stub.prompts[0]
-    assert "Deployment material." in stub.prompts[0]

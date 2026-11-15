@@ -11,7 +11,7 @@ An Electron desktop app that makes Microsoft Teams project information easier to
 | Backend | Python 3.14 + FastAPI — `backend/` |
 | Auth | Supabase Auth (bearer token); `AUTH_MODE=dev` trusts `X-Dev-User-Id` locally |
 | Data | Supabase **Postgres** (the tree, via `ltree`) + Supabase **Storage** (markdown files) |
-| LLM | Groq (OpenAI-compatible, via `httpx`) or Gemini (`google-genai`) — **directory descriptions only** (creation, and the refresh after a placement). `SUMMARIZER=auto` prefers Groq, then Gemini, then a local mock. Search and placement ranking are local (`app/core/text.py`) and make no model call |
+| LLM | Gemini `gemini-2.5-flash-lite` (`google-genai`) — **directory descriptions only** (creation, and the refresh after a placement). It is the **only** provider (Groq was retired); `GEMINI_FALLBACK_MODELS` is empty, so every description comes from that model. `SUMMARIZER=mock` gives the offline describer. Search and placement ranking are local (`app/core/text.py`) and make no model call |
 | Graph DB | **None.** Neo4j was retired; Graph AI Search walks the `ltree` hierarchy instead |
 
 ## Layout
@@ -110,6 +110,10 @@ API docs: <http://localhost:8000/docs> · health: <http://localhost:8000/health>
   `LLM_MIN_INTERVAL_SECONDS` (2 s) apart — retries and fallback models included.
 - Schema changes are SQL in `supabase/migrations/`, reviewed by both of us before they
   are applied to a shared project.
+- **Gemini is the only model provider** (`gemini-2.5-flash-lite`), and anything that can reach
+  the model for real is capped at **5 requests per AI-run task** — read
+  `.clinerules/20-ai-usage-limits.md` before running a live check. Users of the app are not
+  limited (for now).
 - **Graph Add is designed and built** — read `backend/README.md` ("Graph Add endpoints")
   before changing its routes, prompts or the `add_requests` shape. Keep suggestions local
   (`scoring.py`, `navigate.py`: no model call) and keep placement to **one** description call

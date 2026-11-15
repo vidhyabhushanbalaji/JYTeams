@@ -55,47 +55,46 @@ def test_leaving_supabase_url_unset_means_unconfigured(
     assert Settings().supabase_configured is False
 
 
-def test_auto_prefers_groq_when_its_key_is_present(
+def test_a_leftover_groq_key_selects_no_describer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Groq is retired: an old key in .env must not bring a describer back."""
     monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
     get_settings.cache_clear()
 
-    assert Settings().resolved_summarizer == "groq"
+    assert Settings().resolved_summarizer == "mock"
 
 
-def test_the_grok_spelling_is_accepted_as_an_alias(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    monkeypatch.setenv("GROK_API_KEY", "gsk_mistyped")
-    get_settings.cache_clear()
-
-    assert Settings().groq_api_key == "gsk_mistyped"
-
-
-def test_an_explicit_summarizer_wins_over_auto(
+def test_gemini_wins_when_a_groq_key_is_also_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-test")
-    monkeypatch.setenv("SUMMARIZER", "gemini")
     get_settings.cache_clear()
 
     assert Settings().resolved_summarizer == "gemini"
 
 
-def test_groq_models_keep_their_order_and_deduplicate() -> None:
-    settings = Settings(groq_model="a", groq_fallback_models=" b , a ,, c ")
+def test_an_explicit_mock_summarizer_wins_over_a_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test")
+    monkeypatch.setenv("SUMMARIZER", "mock")
+    get_settings.cache_clear()
 
-    assert settings.groq_models == ("a", "b", "c")
+    assert Settings().resolved_summarizer == "mock"
 
 
-def test_gemini_fallbacks_start_with_the_lite_models() -> None:
-    settings = Settings()
+def test_the_shipped_default_model_is_gemini_2_5_flash_lite() -> None:
+    assert Settings.model_fields["gemini_model"].default == "gemini-2.5-flash-lite"
+    # No fallbacks by default: every description is written by the configured model.
+    assert Settings.model_fields["gemini_fallback_models"].default == ""
 
-    assert settings.gemini_models[0] == settings.gemini_model
-    assert settings.gemini_models[1].endswith("-flash-lite")
+
+def test_gemini_models_keep_their_order_and_deduplicate() -> None:
+    settings = Settings(gemini_model="a", gemini_fallback_models=" b , a ,, c ")
+
+    assert settings.gemini_models == ("a", "b", "c")
 
 
 def test_summary_concurrency_is_bounded() -> None:
