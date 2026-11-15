@@ -1,7 +1,7 @@
 # Backend Section Ownership — Scoped Writes
 
-The backend is split into three independent sections. Each is a Python package under
-`backend/app/`. **All three are implemented** and were designed with the team before they were
+The backend is split into independent sections. Each is a Python package under
+`backend/app/`. **All of them are implemented** and were designed with the team before they were
 written; anything new still gets agreed first, one section at a time.
 
 | Section | Directory | HTTP prefix | State |
@@ -9,12 +9,20 @@ written; anything new still gets agreed first, one section at a time.
 | Graph Creation | `backend/app/graph_creation/` | `/api/graph-creation` | implemented |
 | Graph Add | `backend/app/graph_add/` | `/api/graph-add` | implemented |
 | Graph AI Search | `backend/app/graph_ai_search/` | `/api/graph-ai-search` | implemented |
+| Tickets | `backend/app/tickets/` | `/api/tickets` | implemented |
+| Chat | `backend/app/chat/` | `/api/chat` | implemented |
+| Calendar | `backend/app/calendar/` | `/api/calendar` | implemented |
 
 **Shared foundation (no single owner):** `backend/app/main.py`,
 `backend/app/core/`, `backend/app/db/`, `backend/app/health/`, `backend/tests/`,
 `backend/requirements*.txt`, `backend/pyproject.toml`, `backend/.env*`,
 `backend/README.md`, `supabase/migrations/`, `frontend/`, `.clinerules/`,
 root `README.md` and `.gitignore`.
+
+**Agreed interfaces between sections:** `backend/app/graph_ai_search/public.py`,
+`backend/app/graph_creation/public.py` (document/folder mention targets) and
+`backend/app/tickets/public.py` (ticket mention targets and ticket deadlines). Chat and the
+calendar import only these; changing their signatures is a cross-section change.
 
 ## Rules
 

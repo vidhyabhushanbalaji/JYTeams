@@ -8,14 +8,18 @@ export function AppRail({
   memberName,
   onHome,
   onTickets,
+  onChat,
+  onCalendar,
   onSettings,
   onSwitchUser
 }: {
-  active: 'home' | 'project' | 'tickets'
+  active: 'home' | 'project' | 'tickets' | 'chat' | 'calendar'
   health: HealthReport | null
   memberName: string
   onHome: () => void
   onTickets: () => void
+  onChat: () => void
+  onCalendar: () => void
   onSettings: () => void
   onSwitchUser: () => void
 }) {
@@ -50,6 +54,32 @@ export function AppRail({
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
           <path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h13A1.5 1.5 0 0 1 20 8.5v2a2 2 0 0 0 0 4v2a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 16.5v-2a2 2 0 0 0 0-4Z" />
           <path d="M9.5 11h6M9.5 14h4" />
+        </svg>
+      </button>
+
+      <button
+        type="button"
+        className={`rail__btn${active === 'chat' ? ' rail__btn--active' : ''}`}
+        onClick={onChat}
+        aria-label="Chat"
+        title="Chat"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+          <path d="M4.5 6.5A1.5 1.5 0 0 1 6 5h12a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 18 16H9l-4.5 3.5Z" />
+          <path d="M8 9.5h8M8 12.5h5" />
+        </svg>
+      </button>
+
+      <button
+        type="button"
+        className={`rail__btn${active === 'calendar' ? ' rail__btn--active' : ''}`}
+        onClick={onCalendar}
+        aria-label="Calendar"
+        title="Calendar"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+          <rect x="4" y="5.5" width="16" height="14" rx="1.5" />
+          <path d="M4 10h16M8.5 4v3M15.5 4v3M8.5 14h3M8.5 17h6" />
         </svg>
       </button>
 

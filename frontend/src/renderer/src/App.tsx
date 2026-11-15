@@ -2,8 +2,10 @@ import { useCallback, useEffect, useState } from 'react'
 
 import type { AppConfig, HealthReport } from '@shared/types'
 
-import type { TicketFocus } from './lib/ticketFocus'
+import type { GraphFocus } from './lib/graphFocus'
 import { AppRail } from './components/AppRail'
+import { CalendarScreen } from './components/CalendarScreen'
+import { ChatScreen } from './components/ChatScreen'
 import { HomeScreen } from './components/HomeScreen'
 import { IdentityGate } from './components/IdentityGate'
 import { ProjectScreen } from './components/ProjectScreen'
@@ -15,8 +17,10 @@ import { useToasts } from './state/useToasts'
 
 type View =
   | { kind: 'home' }
-  | { kind: 'project'; projectId: string; focus: TicketFocus | null }
-  | { kind: 'tickets' }
+  | { kind: 'project'; projectId: string; focus: GraphFocus | null }
+  | { kind: 'tickets'; ticketId?: string | null; projectId?: string | null }
+  | { kind: 'chat'; projectId?: string | null }
+  | { kind: 'calendar' }
 
 export default function App() {
   const [view, setView] = useState<View>({ kind: 'home' })
@@ -85,6 +89,8 @@ export default function App() {
         memberName={member.display_name}
         onHome={() => setView({ kind: 'home' })}
         onTickets={() => setView({ kind: 'tickets' })}
+        onChat={() => setView({ kind: 'chat' })}
+        onCalendar={() => setView({ kind: 'calendar' })}
         onSettings={() => setSettingsOpen(true)}
         onSwitchUser={switchUser}
       />
@@ -100,8 +106,24 @@ export default function App() {
           <TicketsScreen
             member={member}
             members={identity.members}
+            initialTicketId={view.ticketId ?? null}
+            initialProjectId={view.projectId ?? null}
             onOpenProject={(projectId, focus) => setView({ kind: 'project', projectId, focus })}
             onSwitchUser={switchUser}
+            notify={notify}
+          />
+        ) : view.kind === 'chat' ? (
+          <ChatScreen
+            member={member}
+            initialProjectId={view.projectId ?? null}
+            onOpenProject={(projectId, focus) => setView({ kind: 'project', projectId, focus })}
+            onOpenTicket={(projectId, ticketId) => setView({ kind: 'tickets', projectId, ticketId })}
+            notify={notify}
+          />
+        ) : view.kind === 'calendar' ? (
+          <CalendarScreen
+            member={member}
+            onOpenTicket={(projectId, ticketId) => setView({ kind: 'tickets', projectId, ticketId })}
             notify={notify}
           />
         ) : (
@@ -110,8 +132,8 @@ export default function App() {
             projectId={view.projectId}
             member={member}
             members={identity.members}
-            ticketFocus={view.focus}
-            onClearTicketFocus={() =>
+            graphFocus={view.focus}
+            onClearGraphFocus={() =>
               setView({ kind: 'project', projectId: view.projectId, focus: null })
             }
             onOpenSettings={() => setSettingsOpen(true)}

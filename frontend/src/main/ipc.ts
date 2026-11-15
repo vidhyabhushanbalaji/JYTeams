@@ -8,6 +8,8 @@ import type { IpcMainInvokeEvent, OpenDialogOptions } from 'electron'
 
 import type {
   AppConfig,
+  CalendarEventInput,
+  CalendarEventPatch,
   FileContentInput,
   PlacementInput,
   TicketInput,
@@ -16,6 +18,20 @@ import type {
   XYPosition
 } from '../shared/types'
 import { run } from './api/client'
+import {
+  createEvent,
+  deleteEvent,
+  personalCalendar,
+  projectCalendar,
+  updateEvent
+} from './api/calendar'
+import {
+  deleteMessage,
+  listChannels,
+  listMentionTargets,
+  listMessages,
+  postMessage
+} from './api/chat'
 import { readFileContent, saveFileContent } from './api/files'
 import { ping } from './api/health'
 import { getDirectory, getJob, getProject, getTree, listProjects } from './api/projects'
@@ -164,4 +180,37 @@ export function registerIpc(): void {
   ipcMain.handle('shell:open-external', async (_event, url: string) => {
     await shell.openExternal(url)
   })
+  ipcMain.handle('chat:channels', () => run(listChannels))
+  ipcMain.handle(
+    'chat:messages',
+    (_event, input: { projectId: string; afterSeq?: number; limit?: number }) =>
+      run(() => listMessages(input))
+  )
+  ipcMain.handle('chat:post', (_event, projectId: string, body: string) =>
+    run(() => postMessage(projectId, body))
+  )
+  ipcMain.handle('chat:delete', (_event, messageId: string) => run(() => deleteMessage(messageId)))
+  ipcMain.handle(
+    'chat:mention-targets',
+    (_event, input: { projectId: string; query?: string; limit?: number }) =>
+      run(() => listMentionTargets(input))
+  )
+
+  ipcMain.handle('calendar:personal', (_event, input: { from: string; to: string }) =>
+    run(() => personalCalendar(input))
+  )
+  ipcMain.handle(
+    'calendar:project',
+    (_event, input: { projectId: string; from: string; to: string }) =>
+      run(() => projectCalendar(input))
+  )
+  ipcMain.handle('calendar:create', (_event, input: CalendarEventInput) =>
+    run(() => createEvent(input))
+  )
+  ipcMain.handle('calendar:update', (_event, eventId: string, patch: CalendarEventPatch) =>
+    run(() => updateEvent(eventId, patch))
+  )
+  ipcMain.handle('calendar:delete', (_event, eventId: string) => run(() => deleteEvent(eventId)))
+
+
 }

@@ -10,7 +10,7 @@ Postgres covers it.
 
 ## Status
 
-**Backend and desktop app.** The API boots, health probes work, and **all four sections are
+**Backend and desktop app.** The API boots, health probes work, and **all six sections are
 implemented**: upload a directory of markdown files and you get a described tree (one
 description per folder, produced bottom-up; documents are stored, never summarised); add a
 single document and the service scores every folder locally to suggest where it belongs, then
@@ -19,8 +19,11 @@ matching locally against folder descriptions and document text; and double-click
 read its markdown in the app and save an edit back. **Tickets** sit on top: sign in with a name
 (no password — this is a hackathon build), share a project with teammates, keep a personal
 to-do list of tasks, and press a ticket to see the project documents it is about — the search
-runs once and is cached on the ticket. Details for each:
-[`backend/README.md`](backend/README.md).
+runs once and is cached on the ticket. **Chat** gives every project a group chat with `@`
+mentions of documents, folders and tickets, and **calendars** come in two shapes: one per
+project, and one individual calendar that merges every project you are in — with ticket
+deadlines appearing automatically (all of them on a project calendar, only yours on the
+individual one). Details for each: [`backend/README.md`](backend/README.md).
 
 | Section | Directory | HTTP prefix | State |
 | --- | --- | --- | --- |
@@ -28,9 +31,11 @@ runs once and is cached on the ticket. Details for each:
 | Graph Add | `backend/app/graph_add/` | `/api/graph-add` | implemented |
 | Graph AI Search | `backend/app/graph_ai_search/` | `/api/graph-ai-search` | implemented |
 | Tickets | `backend/app/tickets/` | `/api/tickets` | implemented |
+| Chat | `backend/app/chat/` | `/api/chat` | implemented |
+| Calendar | `backend/app/calendar/` | `/api/calendar` | implemented |
 
-The desktop app (`frontend/`) has a rail with **Projects**, **Tickets**, the API/DB status and
-**Settings**, plus the identity chip that switches user.
+The desktop app (`frontend/`) has a rail with **Projects**, **Tickets**, **Chat**, the
+**Calendar**, the API/DB status and **Settings**, plus the identity chip that switches user.
 
 ## Quickstart (backend)
 
@@ -65,7 +70,7 @@ More detail, including tests and credentials setup: [`backend/README.md`](backen
 backend/              # FastAPI service (app/, tests/, requirements*.txt, .env.example)
 supabase/migrations/   # SQL schema (projects, directories, files, creation_jobs, add_requests,
                        #             members, project_members, tickets, ticket_files,
-                       #             ticket_comments, ticket_events)
+                       #             ticket_comments, ticket_events, chat_messages, calendar_events)
 frontend/             # Electron app (Projects + Tickets, React)
 ```
 

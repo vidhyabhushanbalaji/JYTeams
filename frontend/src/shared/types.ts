@@ -350,6 +350,125 @@ export interface TicketEvent {
   created_at: string | null
 }
 
+/* ------------------------------------------------------------------- chat */
+
+/** What a chat message may point at. */
+export type MentionKind = 'file' | 'directory' | 'ticket'
+
+/** A reference stored with a message (mirrors the backend's MentionOut). */
+export interface ChatMention {
+  kind: MentionKind
+  id: string
+  label: string
+  /** The document's or folder's path; empty for a ticket. */
+  path: string
+  /** The folder a document lives in, so the graph can reveal it directly. */
+  directory_path: string
+  ticket_number: number | null
+}
+
+export interface ChatMessage {
+  seq: number
+  id: string
+  project_id: string
+  author: Member | null
+  body: string
+  mentions: ChatMention[]
+  created_at: string | null
+  /** The author (or the project owner) removed it. */
+  deleted: boolean
+}
+
+/** A project's group chat. */
+export interface ChatChannel {
+  project_id: string
+  project_name: string
+  last_message: ChatMessage | null
+  last_activity_at: string | null
+}
+
+/** One thing the composer may offer after an `@`. */
+export interface MentionTarget {
+  kind: MentionKind
+  id: string
+  label: string
+  path: string
+  directory_path: string
+  ticket_number: number | null
+  detail: string
+}
+
+/* --------------------------------------------------------------- calendar */
+
+export interface CalendarPerson {
+  id: string
+  display_name: string
+}
+
+/** One thing on a day: an added event, or a ticket's deadline. */
+export interface CalendarItem {
+  kind: 'event' | 'deadline'
+  id: string
+  title: string
+  /** ISO date (`YYYY-MM-DD`). */
+  day: string
+  project_id: string | null
+  project_name: string
+  starts_at: string | null
+  ends_at: string | null
+  all_day: boolean
+  notes: string
+  /** Only an event the caller added can be edited or deleted. */
+  editable: boolean
+  created_by: CalendarPerson | null
+  ticket_id: string | null
+  ticket_number: number | null
+  status: TicketStatus | null
+  priority: TicketPriority | null
+  assignee: CalendarPerson | null
+}
+
+export interface CalendarRange {
+  scope: 'personal' | 'project'
+  project_id: string | null
+  project_name: string
+  start: string
+  end: string
+  items: CalendarItem[]
+}
+
+export interface CalendarEventInput {
+  /** Set for a project event; omit (or null) for a personal one. */
+  projectId?: string | null
+  title: string
+  notes?: string
+  startsAt: string
+  endsAt?: string | null
+  allDay?: boolean
+}
+
+export interface CalendarEventPatch {
+  title?: string
+  notes?: string
+  startsAt?: string
+  endsAt?: string | null
+  allDay?: boolean
+}
+
+export interface CalendarEvent {
+  id: string
+  project_id: string | null
+  project_name: string
+  title: string
+  notes: string
+  starts_at: string
+  ends_at: string | null
+  all_day: boolean
+  created_by: CalendarPerson | null
+  created_at: string | null
+  updated_at: string | null
+}
+
 /** A failure normalised by the main process; never thrown across IPC. */
 export interface ApiError {
   /** HTTP status, or 0 when the backend could not be reached at all. */
@@ -466,4 +585,32 @@ export interface JyTeamsApi {
   shell: {
     openExternal(url: string): Promise<void>
   }
+  chat: {
+    channels(): Promise<ApiResult<ChatChannel[]>>
+    messages(input: {
+      projectId: string
+      /** Only messages newer than this seq (the poll cursor). */
+      afterSeq?: number
+      limit?: number
+    }): Promise<ApiResult<ChatMessage[]>>
+    post(projectId: string, body: string): Promise<ApiResult<ChatMessage>>
+    remove(messageId: string): Promise<ApiResult<null>>
+    mentionTargets(input: {
+      projectId: string
+      query?: string
+      limit?: number
+    }): Promise<ApiResult<MentionTarget[]>>
+  }
+  calendar: {
+    personal(input: { from: string; to: string }): Promise<ApiResult<CalendarRange>>
+    project(input: {
+      projectId: string
+      from: string
+      to: string
+    }): Promise<ApiResult<CalendarRange>>
+    create(input: CalendarEventInput): Promise<ApiResult<CalendarEvent>>
+    update(eventId: string, patch: CalendarEventPatch): Promise<ApiResult<CalendarEvent>>
+    remove(eventId: string): Promise<ApiResult<null>>
+  }
+
 }

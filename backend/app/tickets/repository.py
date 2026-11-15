@@ -100,6 +100,18 @@ class TicketRepository(Protocol):
         """Ticket number/title lookups for the activity feed."""
         ...
 
+    async def list_deadlines(
+        self,
+        *,
+        project_ids: list[str],
+        assignee_id: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        include_done: bool = False,
+    ) -> list[Row]:
+        """Tickets with a due date, for the calendar (read-only; never a model call)."""
+        ...
+
     # -- project content -------------------------------------------------------
     async def list_files(self, project_id: str) -> list[Row]: ...
 
@@ -380,6 +392,44 @@ class SupabaseTicketRepository:
                 .in_("id", ticket_ids)
                 .execute()
             )
+            return response.data or []
+
+        return await self._run(run)
+
+    async def list_deadlines(
+        self,
+        *,
+        project_ids: list[str],
+        assignee_id: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        include_done: bool = False,
+    ) -> list[Row]:
+        """Tickets carrying a due date, ordered by that date.
+
+        ``start`` and ``end`` are inclusive ISO dates; ``include_done`` is False by default so a
+        finished ticket stops shadowing the calendar.
+        """
+        if not project_ids:
+            return []
+
+        def run() -> list[Row]:
+            builder = (
+                admin_client()
+                .table("tickets")
+                .select("id, project_id, number, title, status, priority, due_date, assignee_id")
+                .in_("project_id", project_ids)
+                .not_.is_("due_date", "null")
+            )
+            if assignee_id:
+                builder = builder.eq("assignee_id", assignee_id)
+            if not include_done:
+                builder = builder.neq("status", "done")
+            if start:
+                builder = builder.gte("due_date", start)
+            if end:
+                builder = builder.lte("due_date", end)
+            response = builder.order("due_date").execute()
             return response.data or []
 
         return await self._run(run)

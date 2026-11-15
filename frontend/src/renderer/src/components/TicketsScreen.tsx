@@ -6,7 +6,7 @@
  * only expensive action is Refresh. Pressing a file hands the project graph a set to highlight.
  */
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import type { ApiResult, Member, Project, Ticket, TicketStatus } from '@shared/types'
 
@@ -19,7 +19,7 @@ import {
   STATUS_LABEL,
   ticketKey
 } from '../lib/tickets'
-import type { TicketFocus } from '../lib/ticketFocus'
+import type { GraphFocus } from '../lib/graphFocus'
 import { useActivity } from '../state/useActivity'
 import { useProjects } from '../state/useProjects'
 import { useTicketDetail } from '../state/useTicketDetail'
@@ -36,6 +36,8 @@ const STATUSES: TicketStatus[] = ['todo', 'in_progress', 'done']
 export function TicketsScreen({
   member,
   members,
+  initialTicketId,
+  initialProjectId,
   onOpenProject,
   onSwitchUser,
   notify
@@ -43,7 +45,11 @@ export function TicketsScreen({
   member: Member
   /** Every name that has signed in — the share dialog offers the ones not yet on a project. */
   members: Member[]
-  onOpenProject: (projectId: string, focus: TicketFocus) => void
+  /** A ticket a chat mention or a calendar deadline asked to open. */
+  initialTicketId?: string | null
+  /** The project that ticket belongs to, so the list is filtered to it first. */
+  initialProjectId?: string | null
+  onOpenProject: (projectId: string, focus: GraphFocus) => void
   onSwitchUser: () => void
   notify: (message: string, tone?: 'info' | 'error') => void
 }) {
@@ -59,6 +65,8 @@ export function TicketsScreen({
   const [uploadOpen, setUploadOpen] = useState(false)
   const [attachOpen, setAttachOpen] = useState(false)
   const [shareOpen, setShareOpen] = useState(false)
+  const appliedInitial = useRef(false)
+  const skipReset = useRef(true)
 
   const {
     tickets,
@@ -78,6 +86,21 @@ export function TicketsScreen({
   )
 
   useEffect(() => {
+    if (!initialTicketId || appliedInitial.current) return
+    appliedInitial.current = true
+    if (initialProjectId) {
+      setScope('project')
+      setProjectId(initialProjectId)
+    }
+    setSelectedId(initialTicketId)
+    skipReset.current = true
+  }, [initialTicketId, initialProjectId])
+
+  useEffect(() => {
+    if (skipReset.current) {
+      skipReset.current = false
+      return
+    }
     setSelectedId(null)
   }, [scope, projectId, statusFilter])
 
@@ -115,6 +138,7 @@ export function TicketsScreen({
   }): void => {
     if (!selected) return
     onOpenProject(selected.project_id, {
+      kind: 'files',
       label: args.label,
       targets: args.targets,
       entryFileId: args.entryFileId

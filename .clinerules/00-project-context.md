@@ -6,10 +6,10 @@ An Electron desktop app that makes Microsoft Teams project information easier to
 
 | Layer | Choice |
 | --- | --- |
-| Frontend | Electron + Node 24 — `frontend/src` (React); Projects, graph, tickets, settings |
+| Frontend | Electron + Node 24 — `frontend/src` (React); Projects, graph, tickets, chat, calendar, settings |
 | Backend | Python 3.14 + FastAPI — `backend/` |
 | Auth | **A name, no password.** `members` is the identity table; `AUTH_MODE=dev` trusts `X-Dev-User-Id` (a `members.id`) and the app's startup screen signs in by picking or typing a name |
-| Data | Supabase **Postgres** (tree via `ltree`, plus `members`, `project_members`, `tickets`, `ticket_files`, `ticket_comments`, `ticket_events`) + Supabase **Storage** (markdown files) |
+| Data | Supabase **Postgres** (tree via `ltree`, plus `members`, `project_members`, `tickets`, `ticket_files`, `ticket_comments`, `ticket_events`, `chat_messages`, `calendar_events`) + Supabase **Storage** (markdown files) |
 | LLM | Gemini `gemini-3.1-flash-lite` (`google-genai`) — **directory descriptions** (creation, and the refresh after a placement) **and one ticket search-terms distillation** (a ticket's wording → the few words a search should use). It is the **only** provider (Groq was retired); `GEMINI_FALLBACK_MODELS` is empty, so every description comes from that model. `SUMMARIZER=mock` gives the offline describer (and the offline distiller). Search and placement ranking are local (`app/core/text.py`) and make no model call |
 | Graph DB | **None.** Neo4j was retired; Graph AI Search walks the `ltree` hierarchy instead |
 
@@ -25,7 +25,9 @@ backend/
 │  ├─ graph_creation/      # SECTION — implemented (upload a directory → described tree)
 │  ├─ graph_add/           # SECTION — implemented (place one document in that tree)
 │  ├─ graph_ai_search/     # SECTION — implemented (local search: descriptions + document text)
-│  └─ tickets/             # SECTION — implemented (members, sharing, tickets, cached files, feed)
+│  ├─ tickets/             # SECTION — implemented (members, sharing, tickets, cached files, feed)
+│  ├─ chat/                # SECTION — implemented (one group chat per project, `@` mentions)
+│  └─ calendar/            # SECTION — implemented (project calendars + the merged individual one)
 ├─ tests/                  # cross-cutting tests (health, config, wiring)
 ├─ requirements.txt        # runtime deps (pinned)
 ├─ requirements-dev.txt    # -r requirements.txt + pytest / ruff / httpx2
@@ -36,7 +38,7 @@ supabase/
 ```
 
 Sections are mounted at `/api/graph-creation`, `/api/graph-add`, `/api/graph-ai-search`,
-`/api/tickets`.
+`/api/tickets`, `/api/chat`, `/api/calendar`.
 
 ## Graph Creation, in one paragraph
 
@@ -99,6 +101,32 @@ can be attached to a ticket (an existing one, or one placed with the ticket as e
 context) without completing it. Every action writes a `ticket_events` row through
 `app/core/activity.py`, including project-level changes that came from another section, and the
 app's tickets page shows that feed.
+
+## Chat, in one paragraph
+
+A project **is** its group chat: `chat_messages.project_id` is the channel, so there is nothing to
+create or backfill, sharing a project joins you to its chat, and access is the same
+`ProjectAccess` check every section uses. A message may mention a document, a folder or a ticket;
+the composer writes `@[label](file|directory|ticket:<uuid>)` into the text and the backend parses
+it, checks every id belongs to *that* project (a foreign one is a `400`), and stores the resolved
+set on the row (`mentions jsonb`, denormalised so a rename cannot break a chip). The desktop app
+polls `GET /api/chat/projects/{id}/messages?after_seq=<last seq>` every ~3 s while the chat is
+visible — there is no socket, no new dependency and no model call. Pressing a chip opens the
+project graph on that file or folder (the directory case of `GraphFocus`), or the tickets screen
+on that ticket. A delete is a soft delete (`[deleted]`) by the author or the project owner, so the
+cursor never gaps.
+
+## Calendar, in one paragraph
+
+Two calendars, one shape. A project calendar (`GET /api/calendar/projects/{id}`) shows that
+project's events plus **every** ticket deadline in it; the individual calendar
+(`GET /api/calendar/personal`) merges every project the caller is in — their personal events,
+those projects' events, and **only the deadlines of tickets assigned to them**. An event with
+`project_id` is a project event (all members see it, only its creator may edit or delete it);
+without one it is personal. Deadlines are never copied into a calendar table: they are read from
+`tickets.due_date` through `app/tickets/public.py` on every request, so a ticket edit moves its
+deadline immediately and a `done` ticket stops appearing. Items sit on the day they start, all-day
+events are stored at UTC midnight so their day is timezone-stable, and no model is called.
 
 ## Commands
 
@@ -165,6 +193,13 @@ API docs: <http://localhost:8000/docs> · health: <http://localhost:8000/health>
   matcher version) are what make each cache safe to reuse. Bump `MATCHING_VERSION` with
   `ScoreConfig.version` when ranking changes, and `DISTILLER_VERSION` when the prompt or the
   distiller changes.
+- **Chat and Calendar are designed and built and call no model.** Read `backend/README.md` ("Chat
+  endpoints", "Calendar endpoints") before touching them. Chat resolves and validates mention ids
+  against the message's project at post time (never trust a client-sent label) and keeps deleted
+  rows so the `seq` poll cursor never gaps. The calendar never copies a deadline: it reads
+  `tickets.due_date` through `app/tickets/public.py`, and only `ProjectAccess` decides who sees
+  which project event. Both use the agreed public modules — `app/graph_creation/public.py`,
+  `app/tickets/public.py` — instead of another section's internals.
 - **Membership is decided in `app/core/access.py`.** Sections ask `ProjectAccess` for the
   caller's role; `projects.owner_id` is only the creator. Do not reintroduce `owner_id`
   comparisons for access, and do not give another section its own sharing rules.

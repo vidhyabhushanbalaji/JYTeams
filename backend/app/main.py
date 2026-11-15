@@ -14,6 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.routing import APIRouter
 
 from app import __version__
+from app.calendar.router import router as calendar_router
+from app.chat.router import router as chat_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.graph_add.router import router as graph_add_router
@@ -30,6 +32,8 @@ SECTION_ROUTERS: tuple[tuple[str, APIRouter], ...] = (
     ("graph-add", graph_add_router),
     ("graph-ai-search", graph_ai_search_router),
     ("tickets", tickets_router),
+    ("chat", chat_router),
+    ("calendar", calendar_router),
 )
 
 

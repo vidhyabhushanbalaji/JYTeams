@@ -75,6 +75,21 @@ const api: JyTeamsApi = {
     unshare: (projectId: string, memberId: string) =>
       ipcRenderer.invoke('tickets:unshare', projectId, memberId)
   },
+  chat: {
+    channels: () => ipcRenderer.invoke('chat:channels'),
+    messages: (input) => ipcRenderer.invoke('chat:messages', input),
+    post: (projectId: string, body: string) => ipcRenderer.invoke('chat:post', projectId, body),
+    remove: (messageId: string) => ipcRenderer.invoke('chat:delete', messageId),
+    mentionTargets: (input) => ipcRenderer.invoke('chat:mention-targets', input)
+  },
+  calendar: {
+    personal: (input) => ipcRenderer.invoke('calendar:personal', input),
+    project: (input) => ipcRenderer.invoke('calendar:project', input),
+    create: (input) => ipcRenderer.invoke('calendar:create', input),
+    update: (eventId: string, patch) => ipcRenderer.invoke('calendar:update', eventId, patch),
+    remove: (eventId: string) => ipcRenderer.invoke('calendar:delete', eventId)
+  },
+
   shell: {
     openExternal: (url: string) => ipcRenderer.invoke('shell:open-external', url)
   }

@@ -18,8 +18,11 @@ Then prepare Supabase:
 
 1. **Schema** — apply
    [`../supabase/migrations/0001_graph_creation.sql`](../supabase/migrations/0001_graph_creation.sql),
-   [`../supabase/migrations/0002_graph_add.sql`](../supabase/migrations/0002_graph_add.sql)
-   and [`../supabase/migrations/0003_tickets.sql`](../supabase/migrations/0003_tickets.sql)
+   [`../supabase/migrations/0002_graph_add.sql`](../supabase/migrations/0002_graph_add.sql),
+   [`../supabase/migrations/0003_tickets.sql`](../supabase/migrations/0003_tickets.sql),
+   [`../supabase/migrations/0004_ticket_search_terms.sql`](../supabase/migrations/0004_ticket_search_terms.sql),
+   [`../supabase/migrations/0005_chat.sql`](../supabase/migrations/0005_chat.sql)
+   and [`../supabase/migrations/0006_calendar.sql`](../supabase/migrations/0006_calendar.sql)
    either by pasting them into the dashboard SQL editor, or with the CLI:
    `npx supabase link --project-ref <ref>` then `npx supabase db push`.
    The first creates `projects`, `directories`, `files`, `creation_jobs` and enables `ltree`;
@@ -27,7 +30,9 @@ Then prepare Supabase:
    (a name-only identity), adds `project_members`, `tickets`, `ticket_files`, `ticket_comments`,
    `ticket_events` and `files.updated_at`, and drops the old `auth.uid()` policies (the app talks
    to this API, never to Supabase directly). Every existing owner is seeded as a member with the
-   same uuid, so no row is rewritten; the file ends with a rollback block.
+   same uuid, so no row is rewritten; the file ends with a rollback block. The fourth adds
+   `tickets.search_terms_fingerprint`; the fifth adds `chat_messages`; the sixth adds
+   `calendar_events`. The last three are additive, with a rollback block each.
 2. **Storage** — create a **private** bucket named `project-files` (Storage → New bucket),
    or point `STORAGE_BUCKET` at whatever you call it.
 3. **Auth** — for real tokens set `AUTH_MODE=supabase`. `AUTH_MODE=dev` (the default)
@@ -577,6 +582,56 @@ code spans and URLs are untouched, and **no model is called**:
 Add `--project-id <uuid>` to sweep one project. A folder's description is not re-described;
 only its punctuation changes, so no quota is spent and the tree keeps its shape.
 
+## Chat endpoints
+
+Mounted at `/api/chat`. **A project is its group chat**: there is no channel table and nothing to
+create, because `chat_messages.project_id` *is* the channel. Every project therefore already has
+one, sharing a project (`project_members`) puts the member in its chat, and deleting the project
+takes its messages with it. Access is `ProjectAccess.require`, so a stranger gets `404`.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/channels` | my projects as chats, newest activity first, each with its last message |
+| `GET` | `/projects/{id}/messages?after_seq=&limit=` | the newest page (`seq` ascending), or everything after a cursor |
+| `POST` | `/projects/{id}/messages` | `{ "body": "…" }` → the stored message, mentions resolved |
+| `DELETE` | `/messages/{id}` | soft delete (body becomes `[deleted]`); the author, or the project owner |
+| `GET` | `/projects/{id}/mention-targets?q=` | documents, folders and tickets the composer may offer |
+
+**Mentions.** The composer writes a marker into the text — `@[auth.md](file:<uuid>)`,
+`@[guides](directory:<uuid>)`, `@[Fix the redirect](ticket:<uuid>)` — and the backend parses it,
+checks every id belongs to *that* project, and stores the resolved set on the row
+(`mentions jsonb`: kind, id, label, path, directory path, ticket number). One source of truth
+means what a reader sees is what was validated; an unknown or foreign id is a `400`. A deleted
+message keeps its row (and `seq`) so pollers never gap.
+
+**Polling, not sockets.** The desktop renderer has no network access, so it asks
+`GET …/messages?after_seq=<last seq>` every ~3 s while the chat is visible (`useChat` pauses while
+the window is hidden). Nothing here calls a model, and nothing writes to a project tree.
+
+Pressing a chip is what ties chat to the rest of the app: a document opens the project graph
+focused on that file, a folder opens it at that folder, and a ticket opens the tickets screen on
+that ticket.
+
+## Calendar endpoints
+
+Mounted at `/api/calendar`. Two calendars share one shape:
+
+* **`GET /personal?from=&to=`** — the individual calendar, merging every project the caller is in:
+  their own (personal) events, those projects' events, and **only the deadlines of tickets
+  assigned to them**.
+* **`GET /projects/{id}?from=&to=`** — a project calendar: its events and **every** ticket
+  deadline in it.
+* **`POST /events`**, **`PATCH /events/{id}`**, **`DELETE /events/{id}`** — events.
+
+An event with `project_id` is a **project event** (every project member sees it); without it, a
+**personal event** (only its creator sees it). Only the creator may edit or delete an event. A
+range is at most 400 days and `ends_at` may not precede `starts_at`.
+
+**Deadlines are not copied.** They are read from `tickets.due_date` through
+[`app/tickets/public.py`](app/tickets/public.py) on every request, so editing a ticket moves its
+deadline immediately, and a `done` ticket stops appearing. Nothing is written to a ticket and no
+model is called. Items sit on the day they start.
+
 ## Test & lint
 
 ```powershell
@@ -641,6 +696,21 @@ app/
    ├─ adapters.py     # Graph AI Search through its public module
    ├─ tools/          # verify_tickets (offline), seed_demo (Supabase)
    └─ tests/
+├─ chat/              # SECTION — implemented (one group chat per project, with mentions)
+│  ├─ router.py       # HTTP surface
+│  ├─ service.py      # membership, message resolution, channels
+│  ├─ mentions.py     # the `@[label](kind:id)` marker: parse, clean, dedupe (pure)
+│  ├─ adapters.py     # mention targets through the graph + tickets public modules
+│  ├─ repository.py   # PostgREST access (chat_messages, names)
+│  ├─ schemas.py
+│  └─ tests/
+└─ calendar/          # SECTION — implemented (project calendars + the merged individual one)
+   ├─ router.py       # HTTP surface
+   ├─ service.py      # scope rules, event ownership, deadline merge
+   ├─ adapters.py     # ticket deadlines through app.tickets.public
+   ├─ repository.py   # PostgREST access (calendar_events, names)
+   ├─ schemas.py
+   └─ tests/
 ```
 
 ## Configuration
@@ -665,6 +735,15 @@ All settings and defaults live in `app/core/config.py`; env var names are in
 | `MAX_UPLOAD_FILES`, `MAX_UPLOAD_BYTES`, `MAX_FILE_BYTES`, `MAX_DIRECTORY_DEPTH` | Upload limits |
 
 ## Known limitations
+
+- **Chat is polled, not pushed.** A message can take up to ~3 seconds to appear for somebody else
+  (a 3-second poll in `useChat`). There is no typing indicator, read receipt, reaction, thread or
+  message edit; deletion is a soft delete (`[deleted]`) so the `seq` cursor never gaps.
+- **A calendar item sits on the day it starts.** A multi-day event is drawn on its first day, not
+  repeated across the range. An all-day event is stored at UTC midnight so its day is stable in
+  every timezone; a timed event keeps the machine's offset.
+- **Deadlines are read live and are never editable from the calendar.** Changing one means editing
+  the ticket; a `done` ticket's deadline drops off the calendar.
 
 - **Identity is a name, and that is the whole check.** `X-Dev-User-Id` is trusted in
   `AUTH_MODE=dev`, and a member is created by typing a name on the startup screen. Anyone can be

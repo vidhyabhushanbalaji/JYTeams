@@ -1,20 +1,7 @@
-/** What a ticket hands the graph: which files to highlight, and which one to open first. */
+/**
+ * The graph focus model now lives in `graphFocus.ts` (it covers folders as well as files).
+ * This module remains the import site the tickets screen uses.
+ */
 
-export interface TicketFocusTarget {
-  fileId: string
-  directoryPath: string
-  name: string
-}
-
-export interface TicketFocus {
-  /** A human label for the strip above the canvas, e.g. "#12 Fix the login redirect". */
-  label: string
-  targets: TicketFocusTarget[]
-  /** The file the graph should reveal and focus; the rest stay highlighted. */
-  entryFileId: string
-}
-
-export const focusForFile = (
-  focus: TicketFocus,
-  fileId: string
-): TicketFocusTarget | null => focus.targets.find((target) => target.fileId === fileId) ?? null
+export type { TicketFocus, TicketFocusTarget } from './graphFocus'
+export { focusForFile } from './graphFocus'
